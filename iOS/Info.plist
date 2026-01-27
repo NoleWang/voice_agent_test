@@ -59,10 +59,11 @@
 	</dict>
 	<key>LIVEKIT_API_KEY</key>
 	<string>APILa3vrufsva2G</string>
+	<key>LIVEKIT_PHONE_NUMBER</key>
+	<string>+15551234567</string>
 	<key>LIVEKIT_ROOM</key>
 	<string>bank-voice-agent-1jbj0g</string>
 	<key>LIVEKIT_URL</key>
 	<string>wss://voice-agent-p53xi9ex.livekit.cloud</string>
 </dict>
 </plist>
-

@@ -113,11 +113,6 @@ class TokenRequest(BaseModel):
     name: str | None = None
 
 
-class SIPOutboundCallRequest(BaseModel):
-    room: str
-    phone_number: str
-
-
 # ---------------------------------------------------------------------
 # DataPacket publish helper
 # ---------------------------------------------------------------------
@@ -631,62 +626,6 @@ def create_token(req: TokenRequest):
         .to_jwt()
     )
     return {"token": token}
-
-
-@app.post("/livekit/sip/outbound")
-async def create_sip_outbound_call(req: SIPOutboundCallRequest):
-    """
-    Create a SIP outbound call to the specified phone number and add it to the LiveKit room.
-    Requires LiveKit SIP trunk to be configured with Twilio.
-    """
-    livekit_url = _require_env("LIVEKIT_URL")
-    api_key = _require_env("LIVEKIT_API_KEY")
-    api_secret = _require_env("LIVEKIT_API_SECRET")
-    
-    # Get SIP trunk name from environment (default to "twilio" if not set)
-    sip_trunk = os.getenv("LIVEKIT_SIP_TRUNK", "twilio")
-    
-    try:
-        # Initialize LiveKit API client
-        lk_api = api.LiveKitAPI(livekit_url, api_key, api_secret)
-        
-        # Clean phone number (remove spaces, dashes, etc.)
-        phone_number = req.phone_number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-        
-        # Ensure phone number starts with + for E.164 format
-        if not phone_number.startswith("+"):
-            phone_number = "+" + phone_number
-        
-        log.info(f"Creating SIP outbound call: room={req.room}, phone={phone_number}, trunk={sip_trunk}")
-        
-        # Create SIP participant (outbound call)
-        # This will initiate a call to the phone number and bridge it into the room
-        sip_participant = await lk_api.sip.create_sip_participant(
-            api.CreateSIPParticipantRequest(
-                room=req.room,
-                dtmf="",  # Optional DTMF digits to send
-                play_ringtone=True,  # Play ringtone while connecting
-                sip_trunk_id=sip_trunk,  # SIP trunk configured in LiveKit
-                sip_call_to=phone_number,  # Destination phone number
-            )
-        )
-        
-        log.info(f"✅ SIP participant created: {sip_participant.participant_identity}")
-        
-        return {
-            "success": True,
-            "participant_identity": sip_participant.participant_identity,
-            "sip_call_id": sip_participant.sip_call_id,
-            "message": f"Call initiated to {phone_number}"
-        }
-        
-    except Exception as e:
-        log.error(f"❌ Failed to create SIP outbound call: {e}", exc_info=True)
-        return {
-            "success": False,
-            "error": str(e),
-            "message": f"Failed to initiate call: {e}"
-        }
 
 
 # ---------------------------------------------------------------------
