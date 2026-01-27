@@ -35,4 +35,13 @@ enum AppConfig {
         }
         return value
     }
+
+    static var liveKitPhoneNumber: String {
+        guard let value = Bundle.main.object(
+            forInfoDictionaryKey: "LIVEKIT_PHONE_NUMBER"
+        ) as? String else {
+            fatalError("LIVEKIT_PHONE_NUMBER missing in Info.plist")
+        }
+        return value
+    }
 }

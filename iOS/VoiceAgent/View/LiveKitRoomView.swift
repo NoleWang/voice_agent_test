@@ -16,27 +16,24 @@ struct LiveKitRoomView: View {
     let roomUrl: String
     let token: String
     let bankPhoneNumber: String?
-    let roomName: String
 
     @Environment(\.dismiss) private var dismiss
     @State private var messageText: String = ""
-    @State private var isCallingBank = false
-    @State private var bankCallStatus: String? = nil
     @State private var showCallAlert = false
     @State private var callAlertMessage = ""
 
     // Use something stable; ideally pass from login/profile
     private let displayName = "iOS User"
+    private let liveKitPhoneNumber = AppConfig.liveKitPhoneNumber
 
     // MARK: - Initializers
 
     /// Use this when parent owns/creates manager.
-    init(manager: LiveKitManager, roomUrl: String, token: String, bankPhoneNumber: String? = nil, roomName: String = "") {
+    init(manager: LiveKitManager, roomUrl: String, token: String, bankPhoneNumber: String? = nil) {
         self.manager = manager
         self.roomUrl = roomUrl
         self.token = token
         self.bankPhoneNumber = bankPhoneNumber
-        self.roomName = roomName
     }
 
     var body: some View {
@@ -52,9 +49,8 @@ struct LiveKitRoomView: View {
 
             inputBar
 
-            // Show call bank button if bank phone number is available
             if let bankPhone = bankPhoneNumber, !bankPhone.isEmpty {
-                callBankButton
+                callBridgeSection(bankPhone: bankPhone)
             }
 
             hangupButton
@@ -150,31 +146,30 @@ struct LiveKitRoomView: View {
         .padding(.bottom, 6)
     }
 
-    private var callBankButton: some View {
-        Button {
-            Task {
-                await callBank()
+    private func callBridgeSection(bankPhone: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Call setup")
+                .font(.headline)
+                .padding(.horizontal)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("1. Call your bank from the Phone app (or tap below).")
+                Text("   (The bank will see your personal phone number.)")
+                Text("2. After the bank answers, tap “Add Call”.")
+                Text("3. Dial the LiveKit number and wait for it to answer.")
+                Text("4. Merge the calls so the agent hears both sides.")
             }
-        } label: {
-            HStack {
-                if isCallingBank {
-                    ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                } else {
-                    Image(systemName: "phone.fill")
-                }
-                Text(isCallingBank ? "Calling..." : (bankCallStatus != nil ? "Call Connected" : "Call Bank"))
-                    .fontWeight(.semibold)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal)
+
+            VStack(spacing: 10) {
+                callButton(title: "Call Bank", number: bankPhone, color: .blue)
+                callButton(title: "Call LiveKit Number", number: liveKitPhoneNumber, color: .purple)
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 52)
-            .background(bankCallStatus != nil ? Color.green : Color.blue)
-            .foregroundColor(.white)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
             .padding(.horizontal)
             .padding(.bottom, 6)
         }
-        .disabled(isCallingBank || bankCallStatus != nil || !manager.isConnected)
     }
 
     private var hangupButton: some View {
@@ -197,44 +192,43 @@ struct LiveKitRoomView: View {
         }
     }
 
-    // MARK: - SIP Call
+    // MARK: - Call Helpers
 
-    private func callBank() async {
-        guard let phoneNumber = bankPhoneNumber, !phoneNumber.isEmpty, !roomName.isEmpty else {
-            await MainActor.run {
-                callAlertMessage = "Bank phone number or room name is missing"
-                showCallAlert = true
+    private func callButton(title: String, number: String, color: Color) -> some View {
+        Button {
+            initiatePhoneCall(title: title, number: number)
+        } label: {
+            HStack {
+                Image(systemName: "phone.fill")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .fontWeight(.semibold)
+                    Text(PhoneCallService.formatPhoneNumber(number))
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+                Spacer()
             }
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .padding(.horizontal)
+            .background(color)
+            .foregroundColor(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+        }
+        .disabled(!manager.isConnected)
+    }
+
+    private func initiatePhoneCall(title: String, number: String) {
+        guard PhoneCallService.isValidPhoneNumber(number) else {
+            callAlertMessage = "Invalid phone number for \(title)."
+            showCallAlert = true
             return
         }
 
-        await MainActor.run {
-            isCallingBank = true
-            bankCallStatus = nil
-        }
-
-        do {
-            let response = try await LiveKitTokenAPI.createSIPOutboundCall(
-                room: roomName,
-                phoneNumber: phoneNumber
-            )
-
-            await MainActor.run {
-                isCallingBank = false
-                if response.success {
-                    bankCallStatus = response.participant_identity ?? "connected"
-                    callAlertMessage = response.message ?? "Call initiated successfully"
-                } else {
-                    callAlertMessage = response.message ?? "Failed to initiate call"
-                    showCallAlert = true
-                }
-            }
-        } catch {
-            await MainActor.run {
-                isCallingBank = false
-                callAlertMessage = "Failed to call bank: \(error.localizedDescription)"
-                showCallAlert = true
-            }
+        let didStart = PhoneCallService.makePhoneCallWithPrompt(number)
+        if !didStart {
+            callAlertMessage = "Unable to start the \(title.lowercased()) call."
+            showCallAlert = true
         }
     }
 

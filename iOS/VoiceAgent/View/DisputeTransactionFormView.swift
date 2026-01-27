@@ -39,8 +39,7 @@ struct DisputeTransactionFormView: View {
         let id = UUID()
         let url: String
         let token: String
-        let bankPhoneNumber: String?  // Bank phone number for SIP outbound call
-        let roomName: String  // Room name for SIP API call
+        let bankPhoneNumber: String?  // Bank phone number for user-initiated call
     }
 
     @State private var joinInfo: LiveKitJoinInfo? = nil
@@ -85,8 +84,7 @@ struct DisputeTransactionFormView: View {
                     manager: liveKitManager,
                     roomUrl: info.url,
                     token: info.token,
-                    bankPhoneNumber: info.bankPhoneNumber,
-                    roomName: info.roomName
+                    bankPhoneNumber: info.bankPhoneNumber
                 )
             }
         }
@@ -605,8 +603,7 @@ struct DisputeTransactionFormView: View {
                     self.joinInfo = LiveKitJoinInfo(
                         url: cleaned,
                         token: resp.token,
-                        bankPhoneNumber: bankPhoneNumber,
-                        roomName: roomName
+                        bankPhoneNumber: bankPhoneNumber
                     )
                 }
 
