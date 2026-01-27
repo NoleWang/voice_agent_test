@@ -1,0 +1,21 @@
+{
+  "dispute" : {
+    "amount" : 123,
+    "bankName" : "Capital One",
+    "bankPhoneNumber" : "1-877-383-4802",
+    "currency" : "USD",
+    "fullCardNumber" : "132133423452",
+    "last4" : "3452",
+    "merchant" : "Weq",
+    "reason" : "We wee",
+    "summary" : "Sad",
+    "txn_date" : "2025-12-25"
+  },
+  "profile" : {
+    "address" : "3117 Raymond ave",
+    "email" : "yuzhoul@usc.edu",
+    "first_name" : "Nope",
+    "last_name" : "Wang",
+    "phone" : "2132921139"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "dispute" : {
+    "amount" : 12,
+    "currency" : "USD",
+    "fullCardNumber" : "1234567890123456343",
+    "last4" : "6343",
+    "merchant" : "Adsasd",
+    "reason" : "Adsasd",
+    "summary" : "Sadasd",
+    "txn_date" : "2025-12-24"
+  },
+  "profile" : {
+    "address" : "3117 Raymond ave",
+    "email" : "yuzhoul@usc.edu",
+    "first_name" : "Nope",
+    "last_name" : "Wang",
+    "phone" : "2132921139"
+  }
+}

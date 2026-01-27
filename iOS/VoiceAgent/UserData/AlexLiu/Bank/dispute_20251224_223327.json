@@ -1,0 +1,21 @@
+{
+  "dispute" : {
+    "amount" : 12,
+    "bankName" : "U.S. Bank",
+    "bankPhoneNumber" : "1-800-872-2657",
+    "currency" : "USD",
+    "fullCardNumber" : "12334345453554213",
+    "last4" : "4213",
+    "merchant" : "Sfdsf",
+    "reason" : "Sdfsdf",
+    "summary" : "Add",
+    "txn_date" : "2025-12-24"
+  },
+  "profile" : {
+    "address" : "3117 Raymond ave",
+    "email" : "yuzhoul@usc.edu",
+    "first_name" : "Nope",
+    "last_name" : "Wang",
+    "phone" : "2132921139"
+  }
+}

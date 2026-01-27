@@ -1,0 +1,21 @@
+{
+  "dispute" : {
+    "amount" : 12,
+    "bankName" : "SunTrust (Truist)",
+    "bankPhoneNumber" : "1-800-786-8787",
+    "currency" : "USD",
+    "fullCardNumber" : "1234454434214342324",
+    "last4" : "2324",
+    "merchant" : "Staff",
+    "reason" : "Dads",
+    "summary" : "Dad",
+    "txn_date" : "2025-12-26"
+  },
+  "profile" : {
+    "address" : "3117 Raymond ave",
+    "email" : "yuzhoul@usc.edu",
+    "first_name" : "Yuzhou",
+    "last_name" : "Liu",
+    "phone" : "2132921139"
+  }
+}

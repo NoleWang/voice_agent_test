@@ -1,0 +1,18 @@
+{
+  "profile": {
+    "first_name": "Jane",
+    "last_name":  "Doe",
+    "email":      "123@gmail.com",
+    "address":    "123 5th Ave, New York, NY 10009",
+    "phone":      "1234567890"
+  },
+  "dispute": {
+    "summary":  "I want to dispute a $150 charge at BestBuy on September 2nd, which I did not authorize",
+    "amount":   150.00,
+    "currency": "USD",
+    "merchant": "BestBuy",
+    "txn_date": "2025-09-02",
+    "reason":   "unauthorized",
+    "last4":    "1234"
+  }
+}
