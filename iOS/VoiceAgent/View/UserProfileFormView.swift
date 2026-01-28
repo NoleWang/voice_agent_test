@@ -53,29 +53,12 @@ struct UserProfileFormView: View {
         } message: {
             Text(viewModel.alertMessage)
         }
-        .background(
-            Group {
-                // Navigation to credit card option view for Credit Card Issues
-                if serviceItem.title == "Credit Card Issues" {
-                    NavigationLink(
-                        destination: CreditCardOptionView(serviceItem: serviceItem),
-                        isActive: $navigateToCreditCardOption
-                    ) {
-                        EmptyView()
-                    }
-                    .hidden()
-                } else {
-                    // Navigation to phone call view for other services
-                    NavigationLink(
-                        destination: PhoneCallView(),
-                        isActive: $navigateToPhoneCall
-                    ) {
-                        EmptyView()
-                    }
-                    .hidden()
-                }
-            }
-        )
+        .navigationDestination(isPresented: $navigateToCreditCardOption) {
+            CreditCardOptionView(serviceItem: serviceItem)
+        }
+        .navigationDestination(isPresented: $navigateToPhoneCall) {
+            PhoneCallView()
+        }
         .onChange(of: viewModel.profileSubmitted) { submitted in
             if submitted {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -369,4 +352,3 @@ class UserProfileFormViewModel: ObservableObject {
         ))
     }
 }
-

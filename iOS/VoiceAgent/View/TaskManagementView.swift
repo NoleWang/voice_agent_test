@@ -1046,7 +1046,7 @@ struct TaskDetailView: View {
         return selectedBank?.phoneNumber
     }
 
-    private func startLiveKitRoom(profile: UserProfile, bankPhoneNumber: String?) {
+    private func startLiveKitRoom(profile: DisputeCase.Profile, bankPhoneNumber: String?) {
         guard !isStartingRoom else { return }
         isStartingRoom = true
 
