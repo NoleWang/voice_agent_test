@@ -208,6 +208,13 @@ struct TaskDetailView: View {
     let task: TaskItem
     let onUpdate: () -> Void
     @Environment(\.dismiss) private var dismiss
+
+    private struct LiveKitJoinInfo: Identifiable {
+        let id = UUID()
+        let url: String
+        let token: String
+        let bankPhoneNumber: String?
+    }
     
     @State private var disputeCase: DisputeCase?
     @State private var summary: String = ""
@@ -235,6 +242,9 @@ struct TaskDetailView: View {
     @State private var showDeleteAlert = false
     @State private var showSaveAlert = false
     @State private var alertMessage = ""
+    @State private var joinInfo: LiveKitJoinInfo? = nil
+    @State private var isStartingRoom = false
+    @StateObject private var liveKitManager = LiveKitManager()
     
     private let currencies = ["USD", "CNY", "EUR", "HKD", "JPY", "GBP", "AUD", "CAD"]
     private let banks = Bank.allBanks
@@ -289,6 +299,16 @@ struct TaskDetailView: View {
             }
             .sheet(isPresented: $showCountryCodePicker) {
                 CountryCodePickerView(selectedCountryCode: $selectedCountryCode)
+            }
+            .fullScreenCover(item: $joinInfo) { info in
+                NavigationView {
+                    LiveKitRoomView(
+                        manager: liveKitManager,
+                        roomUrl: info.url,
+                        token: info.token,
+                        bankPhoneNumber: info.bankPhoneNumber
+                    )
+                }
             }
         }
     }
@@ -791,6 +811,25 @@ struct TaskDetailView: View {
                 .foregroundColor(.white)
                 .cornerRadius(12)
             }
+
+            Button(action: createChatroom) {
+                HStack {
+                    if isStartingRoom {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "message.fill")
+                            .font(.system(size: 18))
+                    }
+                    Text(isStartingRoom ? "Starting…" : "Create Chatroom")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 50)
+                .background((isFormValid && !isStartingRoom) ? Color.green : Color.gray)
+                .foregroundColor(.white)
+                .cornerRadius(12)
+            }
+            .disabled(!isFormValid || isStartingRoom)
         }
     }
     
@@ -977,6 +1016,86 @@ struct TaskDetailView: View {
         } catch {
             alertMessage = "Failed to save task: \(error.localizedDescription)"
             showSaveAlert = true
+        }
+    }
+
+    private func createChatroom() {
+        guard isFormValid else {
+            alertMessage = "Please complete all fields correctly."
+            showSaveAlert = true
+            return
+        }
+
+        guard let profile = disputeCase?.profile else {
+            alertMessage = "Profile not found. Please load the task again."
+            showSaveAlert = true
+            return
+        }
+
+        let bankPhoneNumber = currentBankPhoneNumber()
+        startLiveKitRoom(profile: profile, bankPhoneNumber: bankPhoneNumber)
+    }
+
+    private func currentBankPhoneNumber() -> String? {
+        if let bank = selectedBank, bank.isOthers {
+            let phoneNumber = customBankPhone.trimmingCharacters(in: .whitespaces)
+            guard !phoneNumber.isEmpty else { return nil }
+            return "\(selectedCountryCode.code)\(phoneNumber)"
+        }
+
+        return selectedBank?.phoneNumber
+    }
+
+    private func startLiveKitRoom(profile: UserProfile, bankPhoneNumber: String?) {
+        guard !isStartingRoom else { return }
+        isStartingRoom = true
+
+        Task {
+            defer { Task { @MainActor in isStartingRoom = false } }
+
+            do {
+                let roomName = AppConfig.liveKitRoom
+                let identity = "customer_\(profile.first_name.lowercased())_\(profile.last_name.lowercased())"
+                let name = "\(profile.first_name) \(profile.last_name)"
+
+                let resp = try await LiveKitTokenAPI.fetchToken(
+                    room: roomName,
+                    identity: identity,
+                    name: name
+                )
+
+                let candidate = (resp.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let rawUrl: String = {
+                    if candidate.isEmpty || candidate == "wss://" || candidate == "ws://" {
+                        return AppConfig.liveKitURL
+                    }
+                    return candidate
+                }()
+
+                let cleaned = LiveKitManager.normalizeLiveKitURL(rawUrl)
+
+                guard let u = URL(string: cleaned), u.host != nil else {
+                    throw NSError(
+                        domain: "LiveKit",
+                        code: 0,
+                        userInfo: [NSLocalizedDescriptionKey: "Invalid LiveKit URL after normalize: \(cleaned)"]
+                    )
+                }
+
+                await MainActor.run {
+                    self.joinInfo = LiveKitJoinInfo(
+                        url: cleaned,
+                        token: resp.token,
+                        bankPhoneNumber: bankPhoneNumber
+                    )
+                }
+
+            } catch {
+                await MainActor.run {
+                    self.alertMessage = "Failed to get token: \(error.localizedDescription)"
+                    self.showSaveAlert = true
+                }
+            }
         }
     }
     
