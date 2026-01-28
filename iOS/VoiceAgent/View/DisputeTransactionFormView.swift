@@ -57,6 +57,7 @@ struct DisputeTransactionFormView: View {
                 headerSection
                 formSection
                 submitButton
+                createChatroomButton
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 16)
@@ -403,23 +404,44 @@ struct DisputeTransactionFormView: View {
     private var submitButton: some View {
         Button(action: handleSubmit) {
             HStack(spacing: 10) {
-                if isStartingRoom {
-                    ProgressView()
-                } else {
-                    Image(systemName: "square.and.arrow.down.fill")
-                        .font(.system(size: 18))
-                }
-                Text(isStartingRoom ? "Starting…" : "Save")
+                Image(systemName: "square.and.arrow.down.fill")
+                    .font(.system(size: 18))
+                Text("Save")
                     .fontWeight(.semibold)
             }
             .frame(maxWidth: .infinity)
             .frame(height: 50)
-            .background((isFormValid && !isStartingRoom) ? Color.blue : Color.gray)
+            .background(isFormValid ? Color.blue : Color.gray)
             .foregroundColor(.white)
             .cornerRadius(12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke((isFormValid && !isStartingRoom) ? Color.blue.opacity(0.3) : Color.clear, lineWidth: 1)
+                    .stroke(isFormValid ? Color.blue.opacity(0.3) : Color.clear, lineWidth: 1)
+            )
+        }
+        .disabled(!isFormValid || isStartingRoom)
+    }
+
+    private var createChatroomButton: some View {
+        Button(action: handleCreateChatroom) {
+            HStack(spacing: 10) {
+                if isStartingRoom {
+                    ProgressView()
+                } else {
+                    Image(systemName: "message.fill")
+                        .font(.system(size: 18))
+                }
+                Text(isStartingRoom ? "Starting…" : "Create Chatroom")
+                    .fontWeight(.semibold)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 50)
+            .background((isFormValid && !isStartingRoom) ? Color.green : Color.gray)
+            .foregroundColor(.white)
+            .cornerRadius(12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke((isFormValid && !isStartingRoom) ? Color.green.opacity(0.3) : Color.clear, lineWidth: 1)
             )
         }
         .disabled(!isFormValid || isStartingRoom)
@@ -498,25 +520,7 @@ struct DisputeTransactionFormView: View {
 
         let digitsOnly = cardNumber.filter { $0.isNumber }
         let fullCardNumber = digitsOnly.isEmpty ? nil : digitsOnly  // Save full card number
-        
-        // Get bank name and phone number from selected bank or custom input
-        let bankName: String?
-        let bankPhoneNumber: String?
-        if let bank = selectedBank, bank.isOthers {
-            // Use custom inputs for "Others"
-            bankName = customBankName.trimmingCharacters(in: .whitespaces).isEmpty ? nil : customBankName.trimmingCharacters(in: .whitespaces)
-            // Combine country code with phone number
-            let phoneNumber = customBankPhone.trimmingCharacters(in: .whitespaces)
-            if phoneNumber.isEmpty {
-                bankPhoneNumber = nil
-            } else {
-                bankPhoneNumber = "\(selectedCountryCode.code)\(phoneNumber)"
-            }
-        } else {
-            // Use predefined bank info
-            bankName = selectedBank?.name
-            bankPhoneNumber = selectedBank?.phoneNumber
-        }
+        let bankInfo = currentBankInfo()
         
         let disputePayload = DisputeCase.Dispute(
             summary: summary.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -527,8 +531,8 @@ struct DisputeTransactionFormView: View {
             reason: reason.trimmingCharacters(in: .whitespacesAndNewlines),
             last4: lastFourDigits,
             fullCardNumber: fullCardNumber,
-            bankName: bankName,
-            bankPhoneNumber: bankPhoneNumber
+            bankName: bankInfo.name,
+            bankPhoneNumber: bankInfo.phoneNumber
         )
 
         do {
@@ -541,23 +545,53 @@ struct DisputeTransactionFormView: View {
             )
 
             NotificationCenter.default.post(name: NSNotification.Name("TaskListNeedsUpdate"), object: nil)
-
-            // ✅ Start LiveKit after successful save
-            startLiveKitRoom(profile: profile, bankPhoneNumber: bankPhoneNumber)
-
-            // Optional: dismiss only if LiveKit doesn't present quickly
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                if joinInfo != nil { return }
-                NotificationCenter.default.post(name: NSNotification.Name("DismissToServiceCategory"), object: nil)
-                NotificationCenter.default.post(name: NSNotification.Name("DismissToBankPage"), object: nil)
-                dismiss()
-            }
+            NotificationCenter.default.post(name: NSNotification.Name("DismissToServiceCategory"), object: nil)
+            NotificationCenter.default.post(name: NSNotification.Name("DismissToBankPage"), object: nil)
+            dismiss()
 
         } catch {
             alertTitle = "Error"
             alertMessage = "Failed to save dispute: \(error.localizedDescription)"
             showAlert = true
         }
+    }
+
+    private func handleCreateChatroom() {
+        guard isFormValid else {
+            alertTitle = "Notice"
+            alertMessage = "Please complete all fields correctly. Amount must be numeric and card number must be at least 4 digits."
+            showAlert = true
+            return
+        }
+
+        guard let profile = UserProfileService.loadProfile() else {
+            alertTitle = "Profile Missing"
+            alertMessage = "Profile not found. Please fill in your profile first."
+            showAlert = true
+            return
+        }
+
+        let bankInfo = currentBankInfo()
+        startLiveKitRoom(profile: profile, bankPhoneNumber: bankInfo.phoneNumber)
+    }
+
+    private func currentBankInfo() -> (name: String?, phoneNumber: String?) {
+        if let bank = selectedBank, bank.isOthers {
+            let bankName = customBankName.trimmingCharacters(in: .whitespaces)
+            let phoneNumber = customBankPhone.trimmingCharacters(in: .whitespaces)
+            let formattedPhone: String?
+            if phoneNumber.isEmpty {
+                formattedPhone = nil
+            } else {
+                formattedPhone = "\(selectedCountryCode.code)\(phoneNumber)"
+            }
+            return (
+                name: bankName.isEmpty ? nil : bankName,
+                phoneNumber: formattedPhone
+            )
+        }
+
+        return (name: selectedBank?.name, phoneNumber: selectedBank?.phoneNumber)
     }
 
     // MARK: - LiveKit start (FIXED)
