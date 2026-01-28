@@ -51,6 +51,13 @@ final class LiveKitManager: ObservableObject {
             return
         }
 
+        let hasMicPermission = await requestMicPermission()
+        guard hasMicPermission else {
+            errorMessage = "Microphone permission denied. Enable access in Settings to start a call."
+            isConnected = false
+            return
+        }
+
         do {
             // Force autoSubscribe ON so data/remote tracks are received.
             let opts = ConnectOptions(autoSubscribe: true)
@@ -62,7 +69,7 @@ final class LiveKitManager: ObservableObject {
             refreshParticipants()
 
             // Optional: start mic automatically
-            await enableMicrophone()
+            await enableMicrophone(skipPermissionCheck: true)
 
             // Avoid duplicate “Connected” spam if reconnect triggers delegate too
             if messages.last?.text != "Connected" {
@@ -136,12 +143,14 @@ final class LiveKitManager: ObservableObject {
         }
     }
 
-    func enableMicrophone() async {
+    func enableMicrophone(skipPermissionCheck: Bool = false) async {
         do {
-            let granted = await requestMicPermission()
-            guard granted else {
-                errorMessage = "Microphone permission denied"
-                return
+            if !skipPermissionCheck {
+                let granted = await requestMicPermission()
+                guard granted else {
+                    errorMessage = "Microphone permission denied"
+                    return
+                }
             }
 
             // allowBluetooth is deprecated; use allowBluetoothHFP
@@ -162,6 +171,9 @@ final class LiveKitManager: ObservableObject {
         } catch {
             errorMessage = "Mic start failed: \(error.localizedDescription)"
             isMicOn = false
+            await room.disconnect()
+            isConnected = false
+            refreshParticipants()
         }
     }
 
