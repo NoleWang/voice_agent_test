@@ -30,6 +30,9 @@ final class LiveKitManager: ObservableObject {
     // MARK: - LiveKit
     private(set) var room: Room = Room()
     private let chatTopic = "chat"
+    private let bootstrapTopic = "bootstrap"
+
+    var pendingBootstrapPayload: LiveKitBootstrapPayload?
 
     // MARK: - Audio
     private let audioSession = AVAudioSession.sharedInstance()
@@ -70,6 +73,8 @@ final class LiveKitManager: ObservableObject {
 
             // Optional: start mic automatically
             await enableMicrophone(skipPermissionCheck: true)
+
+            await sendPendingBootstrapPayload()
 
             // Avoid duplicate “Connected” spam if reconnect triggers delegate too
             if messages.last?.text != "Connected" {
@@ -117,6 +122,24 @@ final class LiveKitManager: ObservableObject {
                 errorMessage = "Send failed: \(error.localizedDescription)"
             }
         }
+    }
+
+    func sendBootstrapPayload(_ payload: LiveKitBootstrapPayload) async {
+        do {
+            let encoder = JSONEncoder()
+            let data = try encoder.encode(payload)
+            let opts = DataPublishOptions(topic: bootstrapTopic, reliable: true)
+            try await room.localParticipant.publish(data: data, options: opts)
+            print("📤 iOS sent bootstrap payload")
+        } catch {
+            errorMessage = "Bootstrap send failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func sendPendingBootstrapPayload() async {
+        guard let payload = pendingBootstrapPayload else { return }
+        pendingBootstrapPayload = nil
+        await sendBootstrapPayload(payload)
     }
 
     // MARK: - Participants

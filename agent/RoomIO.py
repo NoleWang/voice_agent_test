@@ -48,6 +48,7 @@ logging.basicConfig(
 log = logging.getLogger("fraud-dispute-agent:llm")
 
 CHAT_TOPIC = "chat"
+BOOTSTRAP_TOPIC = "bootstrap"
 
 
 # ---------------------------------------------------------------------
@@ -327,7 +328,7 @@ def _install_chat_listener(room: Any) -> None:
     async def _handle_packet(packet: Any, participant: Any | None = None) -> None:
         try:
             topic = getattr(packet, "topic", None) or getattr(packet, "destination_topic", None)
-            if topic != CHAT_TOPIC:
+            if topic not in {CHAT_TOPIC, BOOTSTRAP_TOPIC}:
                 return
 
             raw = getattr(packet, "data", None) or getattr(packet, "payload", None)
@@ -337,14 +338,31 @@ def _install_chat_listener(room: Any) -> None:
 
             body = raw.decode("utf-8", errors="ignore")
 
-            text_for_log = body
-            from_name = "user"
             try:
                 obj = json.loads(body)
+            except Exception:
+                obj = None
+
+            if topic == BOOTSTRAP_TOPIC:
+                agent = getattr(room, "_agent_instance", None)
+                if agent is None:
+                    log.warning("📩 bootstrap payload received, but no agent is attached")
+                    return
+                if not isinstance(obj, dict):
+                    log.warning("📩 bootstrap payload received, but payload is not JSON")
+                    return
+                try:
+                    agent.apply_runtime_payload(obj)
+                    log.info("📩 applied bootstrap payload from iOS")
+                except Exception as e:
+                    log.exception("Failed to apply bootstrap payload: %r", e)
+                return
+
+            text_for_log = body
+            from_name = "user"
+            if isinstance(obj, dict):
                 text_for_log = obj.get("text", body)
                 from_name = obj.get("from", "user")
-            except Exception:
-                pass
 
             pid = getattr(participant, "identity", None) or getattr(participant, "sid", None) or "unknown"
             log.info("📩 iOS chat DataPacket (from=%s pid=%s): %s", from_name, pid, text_for_log)
@@ -434,16 +452,7 @@ async def entrypoint(ctx: JobContext):
 
     # Agent persona
     agent = CustomerLLMAgent()
-
-    # Optional bootstrap
-    p = Path(__file__).with_name("test_profile.json")
-    if p.exists():
-        try:
-            payload = json.loads(p.read_text(encoding="utf-8"))
-            agent._apply_bootstrap(payload)  # type: ignore[attr-defined]
-            log.info("Applied bootstrap from test_profile.json")
-        except Exception as e:
-            log.warning("Failed reading/merging test_profile.json: %r", e)
+    setattr(ctx.room, "_agent_instance", agent)
 
     # Session
     session = AgentSession(stt=stt, tts=tts, vad=vad, llm=llm)

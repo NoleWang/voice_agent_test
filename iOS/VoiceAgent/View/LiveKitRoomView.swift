@@ -16,6 +16,7 @@ struct LiveKitRoomView: View {
     let roomUrl: String
     let token: String
     let bankPhoneNumber: String?
+    let bootstrapPayload: LiveKitBootstrapPayload?
 
     @Environment(\.dismiss) private var dismiss
     @State private var messageText: String = ""
@@ -29,11 +30,19 @@ struct LiveKitRoomView: View {
     // MARK: - Initializers
 
     /// Use this when parent owns/creates manager.
-    init(manager: LiveKitManager, roomUrl: String, token: String, bankPhoneNumber: String? = nil) {
+    init(
+        manager: LiveKitManager,
+        roomUrl: String,
+        token: String,
+        bankPhoneNumber: String? = nil,
+        bootstrapPayload: LiveKitBootstrapPayload? = nil
+    ) {
         self.manager = manager
         self.roomUrl = roomUrl
         self.token = token
         self.bankPhoneNumber = bankPhoneNumber
+        self.bootstrapPayload = bootstrapPayload
+        self.manager.pendingBootstrapPayload = bootstrapPayload
     }
 
     var body: some View {

@@ -42,50 +42,9 @@ class UserProfileService {
         return userInfo.username
     }
     
-    /// Get user folder path in UserData
+    /// Get user folder path in UserData (Documents/UserData/[username])
     private static func getUserFolderURL(username: String) throws -> URL {
-        let fm = FileManager.default
-        
-        // Try project directory first
-        let userDataPath = "/Users/alexliu/Desktop/VoiceAgent/iOS/VoiceAgent/UserData"
-        let userFolder = (userDataPath as NSString).appendingPathComponent(username)
-        let projectFolderURL = URL(fileURLWithPath: userFolder, isDirectory: true)
-        
-        // Check if base UserData folder exists, create if not
-        let baseFolderURL = URL(fileURLWithPath: userDataPath, isDirectory: true)
-        if !fm.fileExists(atPath: baseFolderURL.path) {
-            do {
-                try fm.createDirectory(at: baseFolderURL, withIntermediateDirectories: true, attributes: [
-                    .posixPermissions: 0o755
-                ])
-            } catch {
-                // Fall back to Documents
-                return try getUserFolderURLInDocuments(username: username)
-            }
-        }
-        
-        // Check if user folder exists, create if not
-        if !fm.fileExists(atPath: projectFolderURL.path) {
-            do {
-                try fm.createDirectory(at: projectFolderURL, withIntermediateDirectories: true, attributes: [
-                    .posixPermissions: 0o755
-                ])
-            } catch {
-                // Fall back to Documents
-                return try getUserFolderURLInDocuments(username: username)
-            }
-        }
-        
-        // Verify write permissions
-        let testFile = projectFolderURL.appendingPathComponent(".write_test")
-        do {
-            try "test".write(to: testFile, atomically: true, encoding: .utf8)
-            try? fm.removeItem(at: testFile)
-            return projectFolderURL
-        } catch {
-            // Fall back to Documents
-            return try getUserFolderURLInDocuments(username: username)
-        }
+        return try getUserFolderURLInDocuments(username: username)
     }
     
     /// Fallback: Get user folder in Documents
@@ -130,17 +89,6 @@ class UserProfileService {
             return nil
         }
         
-        // Try project directory first
-        let userDataPath = "/Users/alexliu/Desktop/VoiceAgent/iOS/VoiceAgent/UserData"
-        let userFolder = (userDataPath as NSString).appendingPathComponent(username)
-        let projectProfileURL = URL(fileURLWithPath: userFolder).appendingPathComponent(profileFileName)
-        
-        if let data = try? Data(contentsOf: projectProfileURL),
-           let profile = try? JSONDecoder().decode(UserProfile.self, from: data) {
-            return profile
-        }
-        
-        // Fall back to Documents directory
         let fm = FileManager.default
         if let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
             let userDataFolder = docs.appendingPathComponent("UserData")
@@ -171,4 +119,3 @@ class UserProfileService {
         }
     }
 }
-

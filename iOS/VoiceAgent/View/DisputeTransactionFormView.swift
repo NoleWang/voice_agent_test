@@ -40,6 +40,7 @@ struct DisputeTransactionFormView: View {
         let url: String
         let token: String
         let bankPhoneNumber: String?  // Bank phone number for user-initiated call
+        let bootstrapPayload: LiveKitBootstrapPayload?
     }
 
     @State private var joinInfo: LiveKitJoinInfo? = nil
@@ -85,7 +86,8 @@ struct DisputeTransactionFormView: View {
                     manager: liveKitManager,
                     roomUrl: info.url,
                     token: info.token,
-                    bankPhoneNumber: info.bankPhoneNumber
+                    bankPhoneNumber: info.bankPhoneNumber,
+                    bootstrapPayload: info.bootstrapPayload
                 )
             }
         }
@@ -572,7 +574,12 @@ struct DisputeTransactionFormView: View {
         }
 
         let bankInfo = currentBankInfo()
-        startLiveKitRoom(profile: profile, bankPhoneNumber: bankInfo.phoneNumber)
+        let disputePayload = makeDisputePayload(bankInfo: bankInfo)
+        startLiveKitRoom(
+            profile: profile,
+            bankPhoneNumber: bankInfo.phoneNumber,
+            disputePayload: disputePayload
+        )
     }
 
     private func currentBankInfo() -> (name: String?, phoneNumber: String?) {
@@ -596,7 +603,11 @@ struct DisputeTransactionFormView: View {
 
     // MARK: - LiveKit start (FIXED)
 
-    private func startLiveKitRoom(profile: UserProfile, bankPhoneNumber: String?) {
+    private func startLiveKitRoom(
+        profile: UserProfile,
+        bankPhoneNumber: String?,
+        disputePayload: DisputeCase.Dispute?
+    ) {
         guard !isStartingRoom else { return }
         isStartingRoom = true
 
@@ -633,11 +644,16 @@ struct DisputeTransactionFormView: View {
                 }
 
                 await MainActor.run {
+                    let bootstrapPayload = LiveKitBootstrapPayload(
+                        profile: .init(userProfile: profile),
+                        dispute: disputePayload.map { .init(dispute: $0) }
+                    )
                     // ✅ atomic presentation payload with bank phone number
                     self.joinInfo = LiveKitJoinInfo(
                         url: cleaned,
                         token: resp.token,
-                        bankPhoneNumber: bankPhoneNumber
+                        bankPhoneNumber: bankPhoneNumber,
+                        bootstrapPayload: bootstrapPayload
                     )
                 }
 
@@ -649,6 +665,30 @@ struct DisputeTransactionFormView: View {
                 }
             }
         }
+    }
+
+    private func makeDisputePayload(bankInfo: (name: String?, phoneNumber: String?)) -> DisputeCase.Dispute? {
+        guard let amountValue = Double(amount) else { return nil }
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        let dateString = dateFormatter.string(from: txnDate)
+
+        let digitsOnly = cardNumber.filter { $0.isNumber }
+        let fullCardNumber = digitsOnly.isEmpty ? nil : digitsOnly
+
+        return DisputeCase.Dispute(
+            summary: summary.trimmingCharacters(in: .whitespacesAndNewlines),
+            amount: amountValue,
+            currency: currency,
+            merchant: merchant.trimmingCharacters(in: .whitespacesAndNewlines),
+            txn_date: dateString,
+            reason: reason.trimmingCharacters(in: .whitespacesAndNewlines),
+            last4: lastFourDigits,
+            fullCardNumber: fullCardNumber,
+            bankName: bankInfo.name,
+            bankPhoneNumber: bankInfo.phoneNumber
+        )
     }
 }
 
