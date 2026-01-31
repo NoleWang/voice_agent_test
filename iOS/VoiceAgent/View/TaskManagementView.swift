@@ -214,6 +214,7 @@ struct TaskDetailView: View {
         let url: String
         let token: String
         let bankPhoneNumber: String?
+        let bootstrapPayload: LiveKitBootstrapPayload?
     }
     
     @State private var disputeCase: DisputeCase?
@@ -306,7 +307,8 @@ struct TaskDetailView: View {
                         manager: liveKitManager,
                         roomUrl: info.url,
                         token: info.token,
-                        bankPhoneNumber: info.bankPhoneNumber
+                        bankPhoneNumber: info.bankPhoneNumber,
+                        bootstrapPayload: info.bootstrapPayload
                     )
                 }
             }
@@ -1033,7 +1035,12 @@ struct TaskDetailView: View {
         }
 
         let bankPhoneNumber = currentBankPhoneNumber()
-        startLiveKitRoom(profile: profile, bankPhoneNumber: bankPhoneNumber)
+        let disputePayload = makeDisputePayload()
+        startLiveKitRoom(
+            profile: profile,
+            bankPhoneNumber: bankPhoneNumber,
+            disputePayload: disputePayload
+        )
     }
 
     private func currentBankPhoneNumber() -> String? {
@@ -1046,7 +1053,11 @@ struct TaskDetailView: View {
         return selectedBank?.phoneNumber
     }
 
-    private func startLiveKitRoom(profile: DisputeCase.Profile, bankPhoneNumber: String?) {
+    private func startLiveKitRoom(
+        profile: DisputeCase.Profile,
+        bankPhoneNumber: String?,
+        disputePayload: DisputeCase.Dispute?
+    ) {
         guard !isStartingRoom else { return }
         isStartingRoom = true
 
@@ -1083,10 +1094,21 @@ struct TaskDetailView: View {
                 }
 
                 await MainActor.run {
+                    let bootstrapPayload = LiveKitBootstrapPayload(
+                        profile: .init(
+                            firstName: profile.first_name,
+                            lastName: profile.last_name,
+                            email: profile.email,
+                            address: profile.address,
+                            phone: profile.phone
+                        ),
+                        dispute: disputePayload.map { .init(dispute: $0) }
+                    )
                     self.joinInfo = LiveKitJoinInfo(
                         url: cleaned,
                         token: resp.token,
-                        bankPhoneNumber: bankPhoneNumber
+                        bankPhoneNumber: bankPhoneNumber,
+                        bootstrapPayload: bootstrapPayload
                     )
                 }
 
@@ -1097,6 +1119,53 @@ struct TaskDetailView: View {
                 }
             }
         }
+    }
+
+    private func makeDisputePayload() -> DisputeCase.Dispute? {
+        guard let amountValue = Double(amount) else { return nil }
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        let dateString = dateFormatter.string(from: txnDate)
+
+        let digitsOnly = cardNumber.filter { $0.isNumber }
+        let fullCardNumber = digitsOnly.isEmpty ? nil : digitsOnly
+        let bankInfo = currentBankInfo()
+
+        return DisputeCase.Dispute(
+            summary: summary.trimmingCharacters(in: .whitespacesAndNewlines),
+            amount: amountValue,
+            currency: currency,
+            merchant: merchant.trimmingCharacters(in: .whitespacesAndNewlines),
+            txn_date: dateString,
+            reason: reason.trimmingCharacters(in: .whitespacesAndNewlines),
+            last4: lastFourDigits,
+            fullCardNumber: fullCardNumber,
+            bankName: bankInfo.name,
+            bankPhoneNumber: bankInfo.phoneNumber
+        )
+    }
+
+    private func currentBankInfo() -> (name: String?, phoneNumber: String?) {
+        if let bank = selectedBank, bank.isOthers {
+            let bankName = customBankName.trimmingCharacters(in: .whitespaces)
+            let phoneNumber = customBankPhone.trimmingCharacters(in: .whitespaces)
+
+            if bankName.isEmpty && phoneNumber.isEmpty {
+                return (name: nil, phoneNumber: nil)
+            }
+
+            let formattedPhone: String?
+            if phoneNumber.isEmpty {
+                formattedPhone = nil
+            } else {
+                formattedPhone = "\(selectedCountryCode.code)\(phoneNumber)"
+            }
+
+            return (name: bankName.isEmpty ? nil : bankName, phoneNumber: formattedPhone)
+        }
+
+        return (name: selectedBank?.name, phoneNumber: selectedBank?.phoneNumber)
     }
     
     private func deleteTask() {

@@ -103,13 +103,20 @@ class CustomerLLMAgent(Agent):
                 log.warning("PROFILE_JSON path not found: %s", p)
 
         if candidate is None:
+            dynamic_payload = self._load_dynamic_payload()
+            if dynamic_payload:
+                self._apply_bootstrap(dynamic_payload)
+                log.info("CustomerLLMAgent: loaded dynamic payload from UserData")
+                return
+
+        if candidate is None:
             p = Path(__file__).with_name("test_profile.json")
             if p.exists():
                 candidate = p
 
         if candidate is None:
             log.warning(
-                "No profile JSON found. Provide PROFILE_JSON or put test_profile.json next to customer_agent.py"
+                "No profile JSON found. Provide PROFILE_JSON, or ensure UserData/profile.json + dispute_*.json, or put test_profile.json next to customer_agent.py"
             )
             return
 
@@ -120,29 +127,170 @@ class CustomerLLMAgent(Agent):
         except Exception as e:
             log.exception("Failed to load profile JSON: %s", e)
 
-    def _apply_bootstrap(self, data: Dict[str, Any]) -> None:
-        prof = data.get("profile") or {}
-        disp = data.get("dispute") or {}
+    def _load_dynamic_payload(self) -> Optional[Dict[str, Any]]:
+        user_data_root = self._resolve_user_data_root()
+        if user_data_root is None:
+            return None
 
-        self.profile.first_name = str(prof.get("first_name", "") or "")
-        self.profile.last_name = str(prof.get("last_name", "") or "")
-        self.profile.email = str(prof.get("email", "") or "")
-        self.profile.address = str(prof.get("address", "") or "")
-        self.profile.phone = str(prof.get("phone", "") or "")
+        user_folder = self._resolve_user_folder(user_data_root)
+        if user_folder is None:
+            return None
 
-        self.dispute.last4 = str(disp.get("last4", "") or "")
-        self.dispute.txn_date = str(disp.get("txn_date", "") or "")
+        profile_payload = self._load_profile_payload(user_folder)
+        dispute_payload = self._load_latest_dispute_payload(user_folder)
 
+        if not profile_payload and not dispute_payload:
+            return None
+
+        payload: Dict[str, Any] = {}
+        if profile_payload:
+            payload["profile"] = profile_payload
+        if dispute_payload:
+            payload["dispute"] = dispute_payload
+        return payload
+
+    def _resolve_user_data_root(self) -> Optional[Path]:
+        explicit_root = os.getenv("VOICE_AGENT_USERDATA_DIR", "").strip()
+        if explicit_root:
+            root = Path(explicit_root).expanduser()
+            if root.exists():
+                return root
+            log.warning("VOICE_AGENT_USERDATA_DIR not found: %s", root)
+
+        repo_root = Path(__file__).resolve().parents[1]
+        repo_user_data = repo_root / "iOS" / "VoiceAgent" / "UserData"
+        if repo_user_data.exists():
+            return repo_user_data
+
+        return None
+
+    def _resolve_user_folder(self, user_data_root: Path) -> Optional[Path]:
+        preferred_user = os.getenv("VOICE_AGENT_USER", "").strip()
+        if preferred_user:
+            candidate = user_data_root / preferred_user
+            if candidate.exists():
+                return candidate
+            log.warning("VOICE_AGENT_USER folder not found: %s", candidate)
+
+        user_dirs = [p for p in user_data_root.iterdir() if p.is_dir()]
+        if not user_dirs:
+            return None
+
+        if len(user_dirs) == 1:
+            return user_dirs[0]
+
+        profile_files = [d / "profile.json" for d in user_dirs if (d / "profile.json").exists()]
+        if profile_files:
+            latest_profile = max(profile_files, key=lambda p: p.stat().st_mtime)
+            return latest_profile.parent
+
+        return max(user_dirs, key=lambda p: p.stat().st_mtime)
+
+    def _load_profile_payload(self, user_folder: Path) -> Dict[str, Any]:
+        profile_file = user_folder / "profile.json"
+        if not profile_file.exists():
+            return {}
+
+        data = self._read_json(profile_file)
+        if not isinstance(data, dict):
+            return {}
+
+        return self._normalize_profile(data)
+
+    def _load_latest_dispute_payload(self, user_folder: Path) -> Dict[str, Any]:
+        dispute_files = [
+            p
+            for p in user_folder.rglob("*.json")
+            if p.name != "profile.json" and not p.name.startswith(".")
+        ]
+        if not dispute_files:
+            return {}
+
+        latest_file = max(dispute_files, key=lambda p: p.stat().st_mtime)
+        data = self._read_json(latest_file)
+        if not isinstance(data, dict):
+            return {}
+
+        dispute_payload = data.get("dispute") if "dispute" in data else data
+        if not isinstance(dispute_payload, dict):
+            return {}
+
+        profile_payload = data.get("profile")
+        if isinstance(profile_payload, dict):
+            normalized_profile = self._normalize_profile(profile_payload)
+            if normalized_profile:
+                self.profile.first_name = normalized_profile.get("first_name", self.profile.first_name)
+                self.profile.last_name = normalized_profile.get("last_name", self.profile.last_name)
+                self.profile.email = normalized_profile.get("email", self.profile.email)
+                self.profile.address = normalized_profile.get("address", self.profile.address)
+                self.profile.phone = normalized_profile.get("phone", self.profile.phone)
+
+        return dispute_payload
+
+    def _normalize_profile(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        profile = data.get("profile") if "profile" in data else data
+        if not isinstance(profile, dict):
+            return {}
+
+        return {
+            "first_name": profile.get("first_name") or profile.get("firstName") or "",
+            "last_name": profile.get("last_name") or profile.get("lastName") or "",
+            "email": profile.get("email") or "",
+            "address": profile.get("address") or "",
+            "phone": profile.get("phone") or profile.get("phoneNumber") or "",
+        }
+
+    @staticmethod
+    def _read_json(path: Path) -> Optional[Dict[str, Any]]:
         try:
-            amt = disp.get("amount", 0.0)
-            self.dispute.amount = float(amt) if amt is not None else 0.0
-        except Exception:
-            self.dispute.amount = 0.0
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning("Failed to read JSON %s: %s", path, e)
+            return None
 
-        self.dispute.currency = str(disp.get("currency", "USD") or "USD")
-        self.dispute.merchant = str(disp.get("merchant", "") or "")
-        self.dispute.reason = str(disp.get("reason", "") or "")
-        self.dispute.summary = str(disp.get("summary", "") or "")
+    def _apply_bootstrap(self, data: Dict[str, Any]) -> None:
+        prof = self._normalize_profile(data)
+        disp = self._normalize_dispute(data)
+
+        if prof:
+            self.profile.first_name = str(prof.get("first_name", "") or "")
+            self.profile.last_name = str(prof.get("last_name", "") or "")
+            self.profile.email = str(prof.get("email", "") or "")
+            self.profile.address = str(prof.get("address", "") or "")
+            self.profile.phone = str(prof.get("phone", "") or "")
+
+        if disp:
+            self.dispute.last4 = str(disp.get("last4", "") or "")
+            self.dispute.txn_date = str(disp.get("txn_date", "") or "")
+
+            try:
+                amt = disp.get("amount", 0.0)
+                self.dispute.amount = float(amt) if amt is not None else 0.0
+            except Exception:
+                self.dispute.amount = 0.0
+
+            self.dispute.currency = str(disp.get("currency", "USD") or "USD")
+            self.dispute.merchant = str(disp.get("merchant", "") or "")
+            self.dispute.reason = str(disp.get("reason", "") or "")
+            self.dispute.summary = str(disp.get("summary", "") or "")
+
+    def apply_runtime_payload(self, data: Dict[str, Any]) -> None:
+        self._apply_bootstrap(data)
+
+    def _normalize_dispute(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        dispute = data.get("dispute") if "dispute" in data else data
+        if not isinstance(dispute, dict):
+            return {}
+
+        return {
+            "summary": dispute.get("summary") or "",
+            "amount": dispute.get("amount", 0.0),
+            "currency": dispute.get("currency") or "USD",
+            "merchant": dispute.get("merchant") or "",
+            "txn_date": dispute.get("txn_date") or dispute.get("txnDate") or "",
+            "reason": dispute.get("reason") or "",
+            "last4": dispute.get("last4") or "",
+        }
 
     # -------------------------
     # Helper: sentence rendering

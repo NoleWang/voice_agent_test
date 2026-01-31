@@ -149,8 +149,7 @@ enum DisputeCaseService {
         return userInfo.username
     }
     
-    /// Ensure the category folder exists under user's folder in UserData
-    /// Tries project directory first, falls back to Documents if permission denied
+    /// Ensure the category folder exists under user's folder in Documents/UserData
     private static func ensureFolder(categoryName: String) throws -> URL {
         guard let username = getCurrentUsername() else {
             throw NSError(
@@ -159,64 +158,8 @@ enum DisputeCaseService {
                 userInfo: [NSLocalizedDescriptionKey: "No user logged in. Please login first."]
             )
         }
-        
-        let fm = FileManager.default
-        
-        // First, try to use project's UserData folder: UserData/[username]/[categoryName]
-        let userDataPath = "/Users/alexliu/Desktop/VoiceAgent/iOS/VoiceAgent/UserData"
-        let userFolder = (userDataPath as NSString).appendingPathComponent(username)
-        let categoryFolder = (userFolder as NSString).appendingPathComponent(categoryName)
-        let projectFolderURL = URL(fileURLWithPath: categoryFolder, isDirectory: true)
-        
-        // Check if base UserData folder exists, create if not
-        let baseFolderURL = URL(fileURLWithPath: userDataPath, isDirectory: true)
-        if !fm.fileExists(atPath: baseFolderURL.path) {
-            do {
-                try fm.createDirectory(at: baseFolderURL, withIntermediateDirectories: true, attributes: [
-                    .posixPermissions: 0o755
-                ])
-            } catch {
-                // If creation fails, fall back to Documents
-                return try ensureFolderInDocuments(username: username, categoryName: categoryName)
-            }
-        }
-        
-        // Check if user folder exists, create if not
-        let userFolderURL = URL(fileURLWithPath: userFolder, isDirectory: true)
-        if !fm.fileExists(atPath: userFolderURL.path) {
-            do {
-                try fm.createDirectory(at: userFolderURL, withIntermediateDirectories: true, attributes: [
-                    .posixPermissions: 0o755
-                ])
-            } catch {
-                // If creation fails, fall back to Documents
-                return try ensureFolderInDocuments(username: username, categoryName: categoryName)
-            }
-        }
-        
-        // Check if category folder exists, create if not
-        if !fm.fileExists(atPath: projectFolderURL.path) {
-            do {
-                try fm.createDirectory(at: projectFolderURL, withIntermediateDirectories: true, attributes: [
-                    .posixPermissions: 0o755
-                ])
-            } catch {
-                // If creation fails, fall back to Documents
-                return try ensureFolderInDocuments(username: username, categoryName: categoryName)
-            }
-        }
-        
-        // Verify write permissions by attempting to create a test file
-        let testFile = projectFolderURL.appendingPathComponent(".write_test")
-        do {
-            try "test".write(to: testFile, atomically: true, encoding: .utf8)
-            try? fm.removeItem(at: testFile)  // Clean up test file
-            // Success! Return project folder
-            return projectFolderURL
-        } catch {
-            // Write test failed, fall back to Documents directory
-            return try ensureFolderInDocuments(username: username, categoryName: categoryName)
-        }
+
+        return try ensureFolderInDocuments(username: username, categoryName: categoryName)
     }
     
     /// Fallback: Ensure the category folder exists under Documents: UserData/[username]/[categoryName]
@@ -242,8 +185,7 @@ enum DisputeCaseService {
         return "dispute_\(ts).json"
     }
     
-    /// Load all saved dispute files as task items from current user's folders
-    /// Checks both project directory and Documents directory
+    /// Load all saved dispute files as task items from current user's folder
     static func loadAllTasks() -> [TaskItem] {
         guard let username = getCurrentUsername() else {
             return []
@@ -251,19 +193,7 @@ enum DisputeCaseService {
         
         let fm = FileManager.default
         var tasks: [TaskItem] = []
-        
-        // Try to load from project directory first: UserData/[username]/[categoryName]
-        let userDataPath = "/Users/alexliu/Desktop/VoiceAgent/iOS/VoiceAgent/UserData"
-        let userFolder = (userDataPath as NSString).appendingPathComponent(username)
-        let userFolderURL = URL(fileURLWithPath: userFolder, isDirectory: true)
-        
-        if fm.fileExists(atPath: userFolderURL.path) {
-            if let categoryFolders = try? fm.contentsOfDirectory(at: userFolderURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-                tasks.append(contentsOf: loadTasksFromFolders(categoryFolders: categoryFolders))
-            }
-        }
-        
-        // Also load from Documents directory (fallback location): UserData/[username]/[categoryName]
+
         if let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
             let userDataFolder = docs.appendingPathComponent("UserData")
             let userFolder = userDataFolder.appendingPathComponent(username, isDirectory: true)
