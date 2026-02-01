@@ -110,9 +110,11 @@ class CustomerLLMAgent(Agent):
                 return
 
         if candidate is None:
-            p = Path(__file__).with_name("test_profile.json")
-            if p.exists():
-                candidate = p
+            allow_test = os.getenv("ALLOW_TEST_PROFILE", "0").strip().lower() in {"1", "true", "yes"}
+            if allow_test:
+                p = Path(__file__).with_name("test_profile.json")
+                if p.exists():
+                    candidate = p
 
         if candidate is None:
             log.warning(
@@ -276,6 +278,31 @@ class CustomerLLMAgent(Agent):
 
     def apply_runtime_payload(self, data: Dict[str, Any]) -> None:
         self._apply_bootstrap(data)
+
+    async def resolve_tool_value(self, name: str) -> Optional[str]:
+        """
+        Resolve tool values directly without invoking the LiveKit tool wrapper.
+        Used by RoomIO when the model emits tool tags as plain text.
+        """
+        values = {
+            "get_full_name": self._as_sentence("full_name", self.profile.full_name),
+            "get_first_name": self._as_sentence("first_name", self.profile.first_name),
+            "get_last_name": self._as_sentence("last_name", self.profile.last_name),
+            "get_email": self._as_sentence("email", self.profile.email),
+            "get_address": self._as_sentence("address", self.profile.address),
+            "get_phone": self._as_sentence("phone", self.profile.phone),
+            "get_last4": self._as_sentence("last4", self.dispute.last4),
+            "get_txn_date": self._as_sentence("txn_date", self.dispute.txn_date),
+            "get_amount": self._as_sentence(
+                "amount",
+                f"{self.dispute.amount:.2f}" if self.dispute.amount is not None else "",
+            ),
+            "get_currency": self._as_sentence("currency", self.dispute.currency),
+            "get_merchant": self._as_sentence("merchant", self.dispute.merchant),
+            "get_reason": self._as_sentence("reason", self.dispute.reason),
+            "get_summary": self._as_sentence("summary", self.dispute.summary),
+        }
+        return values.get(name)
 
     def _normalize_dispute(self, data: Dict[str, Any]) -> Dict[str, Any]:
         dispute = data.get("dispute") if "dispute" in data else data

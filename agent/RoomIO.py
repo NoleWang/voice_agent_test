@@ -153,15 +153,21 @@ async def _resolve_tool_calls(text: str, room: Any) -> Optional[str]:
     if agent is None:
         return None
 
+    resolver = getattr(agent, "resolve_tool_value", None)
     resolved: list[str] = []
     for name in tool_names:
-        fn = getattr(agent, name, None)
-        if fn is None:
-            continue
         try:
-            out = fn()
-            if inspect.isawaitable(out):
-                out = await out
+            if callable(resolver):
+                out = resolver(name)
+                if inspect.isawaitable(out):
+                    out = await out
+            else:
+                fn = getattr(agent, name, None)
+                if fn is None:
+                    continue
+                out = fn()
+                if inspect.isawaitable(out):
+                    out = await out
             if isinstance(out, str) and out.strip():
                 resolved.append(out.strip())
         except Exception:
