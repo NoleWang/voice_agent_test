@@ -27,6 +27,7 @@ import sys
 import multiprocessing
 from pathlib import Path
 from typing import Any, Optional, AsyncIterator
+import re
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -49,6 +50,7 @@ log = logging.getLogger("fraud-dispute-agent:llm")
 
 CHAT_TOPIC = "chat"
 BOOTSTRAP_TOPIC = "bootstrap"
+TOOL_CALL_PATTERN = re.compile(r"<function=([a-zA-Z0-9_]+)>", re.MULTILINE)
 
 
 # ---------------------------------------------------------------------
@@ -137,6 +139,41 @@ async def publish_chat(room: Any, from_name: str, text: str) -> None:
 
 
 # ---------------------------------------------------------------------
+# Tool call resolution for models that emit tool tags as plain text
+# ---------------------------------------------------------------------
+async def _resolve_tool_calls(text: str, room: Any) -> Optional[str]:
+    if not text:
+        return None
+
+    tool_names = TOOL_CALL_PATTERN.findall(text)
+    if not tool_names:
+        return None
+
+    agent = getattr(room, "_agent_instance", None)
+    if agent is None:
+        return None
+
+    resolved: list[str] = []
+    for name in tool_names:
+        fn = getattr(agent, name, None)
+        if fn is None:
+            continue
+        try:
+            out = fn()
+            if inspect.isawaitable(out):
+                out = await out
+            if isinstance(out, str) and out.strip():
+                resolved.append(out.strip())
+        except Exception:
+            continue
+
+    if not resolved:
+        return None
+
+    return " ".join(resolved)
+
+
+# ---------------------------------------------------------------------
 # GUARANTEED: hook TTS so agent speech text -> DataPacket
 # ---------------------------------------------------------------------
 def _install_tts_to_chat_hook(session: AgentSession, room: Any) -> None:
@@ -181,6 +218,20 @@ def _install_tts_to_chat_hook(session: AgentSession, room: Any) -> None:
             async def _async_wrapper(*args, __orig=orig, **kwargs):
                 text = _extract_text(args, kwargs)
                 if text:
+                    resolved = await _resolve_tool_calls(text, room)
+                    if resolved:
+                        text = resolved
+                        if "text" in kwargs:
+                            kwargs["text"] = text
+                        elif "input" in kwargs:
+                            kwargs["input"] = text
+                        elif "prompt" in kwargs:
+                            kwargs["prompt"] = text
+                        elif "ssml" in kwargs:
+                            kwargs["ssml"] = text
+                        else:
+                            args = (text, *args[1:]) if args else (text,)
+
                     asyncio.create_task(publish_chat(room, os.getenv("AGENT_LABEL", "agent"), str(text)))
                 out = __orig(*args, **kwargs)
                 if inspect.isawaitable(out):
@@ -193,6 +244,27 @@ def _install_tts_to_chat_hook(session: AgentSession, room: Any) -> None:
             def _sync_wrapper(*args, __orig=orig, **kwargs):
                 text = _extract_text(args, kwargs)
                 if text:
+                    resolved = None
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None
+
+                    if loop is None:
+                        resolved = asyncio.run(_resolve_tool_calls(text, room))
+                    if resolved:
+                        text = resolved
+                        if "text" in kwargs:
+                            kwargs["text"] = text
+                        elif "input" in kwargs:
+                            kwargs["input"] = text
+                        elif "prompt" in kwargs:
+                            kwargs["prompt"] = text
+                        elif "ssml" in kwargs:
+                            kwargs["ssml"] = text
+                        else:
+                            args = (text, *args[1:]) if args else (text,)
+
                     asyncio.create_task(publish_chat(room, os.getenv("AGENT_LABEL", "agent"), str(text)))
                 return __orig(*args, **kwargs)
 
