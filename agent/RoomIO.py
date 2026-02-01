@@ -141,6 +141,66 @@ async def publish_chat(room: Any, from_name: str, text: str) -> None:
 # ---------------------------------------------------------------------
 # Tool call resolution for models that emit tool tags as plain text
 # ---------------------------------------------------------------------
+def _resolve_tool_calls_sync(text: str, room: Any) -> Optional[str]:
+    """Synchronous version of tool call resolution for use in sync contexts."""
+    if not text:
+        return None
+
+    tool_names = TOOL_CALL_PATTERN.findall(text)
+    if not tool_names:
+        return None
+
+    agent = getattr(room, "_agent_instance", None)
+    if agent is None:
+        log.warning("⚠️ No agent instance found for tool call resolution")
+        return None
+
+    # Try to use synchronous resolver first
+    sync_resolver = getattr(agent, "resolve_tool_value_sync", None)
+    if sync_resolver and callable(sync_resolver):
+        resolved: list[str] = []
+        for name in tool_names:
+            try:
+                out = sync_resolver(name)
+                if isinstance(out, str) and out.strip():
+                    resolved.append(out.strip())
+                elif out:
+                    log.warning("⚠️ Tool %s returned non-string: %r", name, out)
+            except Exception as e:
+                log.warning("Failed to resolve tool %s: %r", name, e)
+                continue
+        
+        if resolved:
+            result = " ".join(resolved)
+            log.info("✅ Resolved %d tool(s) synchronously: %s", len(tool_names), result[:100])
+            return result
+
+    # Fallback: try async resolver if available
+    resolver = getattr(agent, "resolve_tool_value", None)
+    if resolver and callable(resolver):
+        resolved: list[str] = []
+        for name in tool_names:
+            try:
+                out = resolver(name)
+                # If it's a coroutine, we can't await it in sync context
+                if inspect.isawaitable(out):
+                    log.warning("⚠️ Tool %s resolver is async, cannot resolve synchronously", name)
+                    continue
+                if isinstance(out, str) and out.strip():
+                    resolved.append(out.strip())
+            except Exception as e:
+                log.warning("Failed to resolve tool %s: %r", name, e)
+                continue
+        
+        if resolved:
+            result = " ".join(resolved)
+            log.info("✅ Resolved %d tool(s) (sync fallback): %s", len(tool_names), result[:100])
+            return result
+
+    log.warning("⚠️ No tools resolved from: %s", text[:100])
+    return None
+
+
 async def _resolve_tool_calls(text: str, room: Any) -> Optional[str]:
     if not text:
         return None
@@ -151,6 +211,7 @@ async def _resolve_tool_calls(text: str, room: Any) -> Optional[str]:
 
     agent = getattr(room, "_agent_instance", None)
     if agent is None:
+        log.warning("⚠️ No agent instance found for tool call resolution")
         return None
 
     resolver = getattr(agent, "resolve_tool_value", None)
@@ -164,19 +225,104 @@ async def _resolve_tool_calls(text: str, room: Any) -> Optional[str]:
             else:
                 fn = getattr(agent, name, None)
                 if fn is None:
+                    log.warning("⚠️ Tool function %s not found on agent", name)
                     continue
                 out = fn()
                 if inspect.isawaitable(out):
                     out = await out
-            if isinstance(out, str) and out.strip():
-                resolved.append(out.strip())
-        except Exception:
+            if isinstance(out, str):
+                if out.strip():
+                    resolved.append(out.strip())
+                else:
+                    log.warning("⚠️ Tool %s returned empty string", name)
+            else:
+                log.warning("⚠️ Tool %s returned non-string: %r", name, out)
+        except Exception as e:
+            log.warning("Failed to resolve tool %s: %r", name, e)
             continue
 
     if not resolved:
+        log.warning("⚠️ No tools resolved from: %s", text[:100])
         return None
 
-    return " ".join(resolved)
+    result = " ".join(resolved)
+    log.info("✅ Resolved %d tool(s): %s", len(tool_names), result[:100])
+    return result
+
+
+# ---------------------------------------------------------------------
+# Helper: clean tool call tags from text
+# ---------------------------------------------------------------------
+def _clean_tool_call_tags(text: str) -> str:
+    """Remove any remaining tool call tags from text before TTS."""
+    if not text:
+        return text
+    # Remove tool call patterns like <function=name> or </function> or <tool_call>...</tool_call>
+    cleaned = TOOL_CALL_PATTERN.sub("", text)
+    cleaned = re.sub(r"</?function[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"</?tool_call[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<function[^>]*>.*?</function>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<tool_call[^>]*>.*?</tool_call>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    return cleaned.strip()
+
+
+# ---------------------------------------------------------------------
+# Hook session.say() to filter tool calls
+# ---------------------------------------------------------------------
+def _install_session_say_hook(session: AgentSession, room: Any) -> None:
+    """
+    Hook session.say() directly to filter tool call tags before TTS.
+    This catches all paths where the agent speaks, not just TTS methods.
+    """
+    if getattr(session, "_say_hook_installed", False):
+        return
+    session._say_hook_installed = True
+
+    orig_say = getattr(session, "say", None)
+    if orig_say is None:
+        log.warning("⚠️ session.say() not found; cannot hook")
+        return
+
+    async def _filtered_say(text: str, *args, **kwargs):
+        """Filter tool call tags from text before speaking."""
+        if not isinstance(text, str):
+            return await orig_say(text, *args, **kwargs)
+        
+        original_text = text
+        
+        # Check if text contains tool calls
+        has_tool_calls = bool(TOOL_CALL_PATTERN.search(text))
+        
+        if has_tool_calls:
+            # First try to resolve tool calls
+            resolved = await _resolve_tool_calls(text, room)
+            if resolved:
+                text = resolved
+                log.info("🔧 Resolved tool calls: %s -> %s", original_text[:100], text[:100])
+            else:
+                # If resolution failed, clean tags but log warning
+                cleaned = _clean_tool_call_tags(text)
+                log.warning("⚠️ Tool call resolution failed, cleaned tags: %s -> %s", original_text[:100], cleaned[:100] if cleaned else "(empty)")
+                text = cleaned
+        else:
+            # No tool calls, just clean any stray tags
+            cleaned = _clean_tool_call_tags(text)
+            if cleaned != text:
+                log.info("🧹 Cleaned stray tool call tags: %s -> %s", text[:100], cleaned[:100])
+            text = cleaned
+        
+        # Only speak if there's actual content left
+        if text and text.strip():
+            return await orig_say(text, *args, **kwargs)
+        else:
+            log.warning("⚠️ Filtered out empty text (was: %s)", original_text[:100])
+            return None
+
+    try:
+        setattr(session, "say", _filtered_say)
+        log.info("✅ Installed session.say() hook to filter tool calls")
+    except Exception as e:
+        log.warning("Failed to hook session.say(): %r", e)
 
 
 # ---------------------------------------------------------------------
@@ -224,9 +370,16 @@ def _install_tts_to_chat_hook(session: AgentSession, room: Any) -> None:
             async def _async_wrapper(*args, __orig=orig, **kwargs):
                 text = _extract_text(args, kwargs)
                 if text:
+                    # First try to resolve tool calls
                     resolved = await _resolve_tool_calls(text, room)
                     if resolved:
                         text = resolved
+                    else:
+                        # If no resolution, clean any remaining tool call tags
+                        text = _clean_tool_call_tags(text)
+                    
+                    # Update the appropriate parameter
+                    if text and text.strip():
                         if "text" in kwargs:
                             kwargs["text"] = text
                         elif "input" in kwargs:
@@ -238,7 +391,10 @@ def _install_tts_to_chat_hook(session: AgentSession, room: Any) -> None:
                         else:
                             args = (text, *args[1:]) if args else (text,)
 
-                    asyncio.create_task(publish_chat(room, os.getenv("AGENT_LABEL", "agent"), str(text)))
+                        # Publish to chat only if we have actual content
+                        asyncio.create_task(publish_chat(room, os.getenv("AGENT_LABEL", "agent"), str(text)))
+                    else:
+                        log.warning("⚠️ Not publishing empty text to chat")
                 out = __orig(*args, **kwargs)
                 if inspect.isawaitable(out):
                     return await out
@@ -250,16 +406,48 @@ def _install_tts_to_chat_hook(session: AgentSession, room: Any) -> None:
             def _sync_wrapper(*args, __orig=orig, **kwargs):
                 text = _extract_text(args, kwargs)
                 if text:
+                    log.debug("🔍 Sync wrapper received text: %s", text[:200])
                     resolved = None
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        loop = None
-
-                    if loop is None:
-                        resolved = asyncio.run(_resolve_tool_calls(text, room))
+                    has_tool_calls = bool(TOOL_CALL_PATTERN.search(text))
+                    
+                    if has_tool_calls:
+                        log.info("🔧 Sync wrapper detected tool calls in text: %s", text[:200])
+                        # Try synchronous resolution first (preferred for sync context)
+                        try:
+                            resolved = _resolve_tool_calls_sync(text, room)
+                            if resolved:
+                                log.info("✅ Sync wrapper resolved tool calls synchronously: %s", resolved[:100])
+                        except Exception as e:
+                            log.warning("⚠️ Synchronous tool call resolution failed: %r", e)
+                            resolved = None
+                        
+                        # If sync resolution failed, try async (only if no loop is running)
+                        if not resolved:
+                            try:
+                                loop = asyncio.get_running_loop()
+                                # There's a running loop, we can't use asyncio.run
+                                # Try to use the sync resolver which should work
+                                log.warning("⚠️ Sync resolution failed but loop is running, cannot use async")
+                            except RuntimeError:
+                                # No running loop, we can create a new one for async resolution
+                                try:
+                                    resolved = asyncio.run(_resolve_tool_calls(text, room))
+                                    if resolved:
+                                        log.info("✅ Sync wrapper resolved tool calls via async (new loop): %s", resolved[:100])
+                                except Exception as e:
+                                    log.warning("⚠️ Failed to resolve tool calls in new loop: %r", e)
+                    
                     if resolved:
                         text = resolved
+                        log.info("✅ Sync wrapper using resolved text: %s", text[:100])
+                    else:
+                        # If no resolution, clean any remaining tool call tags
+                        cleaned = _clean_tool_call_tags(text)
+                        if cleaned != text:
+                            log.info("🧹 Sync wrapper cleaned tool call tags: %s -> %s", text[:100], cleaned[:100] if cleaned else "(empty)")
+                        text = cleaned
+                    
+                    if text and text.strip():
                         if "text" in kwargs:
                             kwargs["text"] = text
                         elif "input" in kwargs:
@@ -271,7 +459,16 @@ def _install_tts_to_chat_hook(session: AgentSession, room: Any) -> None:
                         else:
                             args = (text, *args[1:]) if args else (text,)
 
-                    asyncio.create_task(publish_chat(room, os.getenv("AGENT_LABEL", "agent"), str(text)))
+                        # Publish to chat only if we have actual content
+                        try:
+                            loop = asyncio.get_running_loop()
+                            if loop:
+                                asyncio.create_task(publish_chat(room, os.getenv("AGENT_LABEL", "agent"), str(text)))
+                        except RuntimeError:
+                            # No loop, can't publish async - this is OK, the async wrapper will handle it
+                            pass
+                    else:
+                        log.warning("⚠️ Not publishing empty text to chat (sync wrapper). Original: %s", text[:200] if text else "(empty)")
                 return __orig(*args, **kwargs)
 
             wrapped = _sync_wrapper
@@ -430,10 +627,15 @@ def _install_chat_listener(room: Any) -> None:
                     log.warning("📩 bootstrap payload received, but payload is not JSON")
                     return
                 try:
+                    log.info("📩 Received bootstrap payload with keys: %s", list(obj.keys()))
+                    if "dispute" in obj and isinstance(obj["dispute"], dict):
+                        log.info("📩 Bootstrap dispute data: merchant=%s, amount=%s, last4=%s", 
+                                obj["dispute"].get("merchant", ""), obj["dispute"].get("amount", 0),
+                                obj["dispute"].get("last4", ""))
                     agent.apply_runtime_payload(obj)
-                    log.info("📩 applied bootstrap payload from iOS")
+                    log.info("📩 ✅ Successfully applied bootstrap payload from iOS")
                 except Exception as e:
-                    log.exception("Failed to apply bootstrap payload: %r", e)
+                    log.exception("❌ Failed to apply bootstrap payload: %r", e)
                 return
 
             text_for_log = body
@@ -535,6 +737,9 @@ async def entrypoint(ctx: JobContext):
     # Session
     session = AgentSession(stt=stt, tts=tts, vad=vad, llm=llm)
 
+    # ✅ Filter tool calls from session.say() before TTS
+    _install_session_say_hook(session, ctx.room)
+    
     # ✅ main guarantee: agent speech -> iOS chat
     _install_tts_to_chat_hook(session, ctx.room)
 

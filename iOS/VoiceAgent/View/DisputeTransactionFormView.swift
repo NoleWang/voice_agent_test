@@ -539,12 +539,16 @@ struct DisputeTransactionFormView: View {
 
         do {
             let categoryName = getCategoryName(for: serviceItem)
-            _ = try DisputeCaseService.saveCase(
+            let savedURL = try DisputeCaseService.saveCase(
                 profile: profile,
                 dispute: disputePayload,
                 categoryName: categoryName,
                 serviceItemTitle: serviceItem.title
             )
+            
+            print("✅ Successfully saved dispute case")
+            print("   File saved at: \(savedURL.path)")
+            print("   You can find it in: Documents/UserData/[your_username]/\(categoryName)/")
 
             NotificationCenter.default.post(name: NSNotification.Name("TaskListNeedsUpdate"), object: nil)
             NotificationCenter.default.post(name: NSNotification.Name("DismissToServiceCategory"), object: nil)
@@ -552,6 +556,7 @@ struct DisputeTransactionFormView: View {
             dismiss()
 
         } catch {
+            print("❌ Failed to save dispute case: \(error.localizedDescription)")
             alertTitle = "Error"
             alertMessage = "Failed to save dispute: \(error.localizedDescription)"
             showAlert = true

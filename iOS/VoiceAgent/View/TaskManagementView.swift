@@ -870,7 +870,12 @@ struct TaskDetailView: View {
             let decoder = JSONDecoder()
             disputeCase = try decoder.decode(DisputeCase.self, from: data)
             
+            print("📥 Loaded task data from: \(task.fileURL.lastPathComponent)")
+            
             if let dispute = disputeCase {
+                print("   Merchant: \(dispute.dispute.merchant)")
+                print("   Amount: \(dispute.dispute.amount)")
+                print("   Currency: \(dispute.dispute.currency)")
                 summary = dispute.dispute.summary
                 amount = String(format: "%.2f", dispute.dispute.amount)
                 currency = dispute.dispute.currency
@@ -1104,6 +1109,20 @@ struct TaskDetailView: View {
                         ),
                         dispute: disputePayload.map { .init(dispute: $0) }
                     )
+                    
+                    // Log the payload for debugging
+                    if let dispute = disputePayload {
+                        print("📤 Creating chatroom with payload:")
+                        print("   Merchant: \(dispute.merchant)")
+                        print("   Amount: \(dispute.amount)")
+                        print("   Currency: \(dispute.currency)")
+                        print("   Summary: \(dispute.summary)")
+                        print("   Reason: \(dispute.reason)")
+                        print("   Last4: \(dispute.last4)")
+                    } else {
+                        print("⚠️ No dispute payload in bootstrap")
+                    }
+                    
                     self.joinInfo = LiveKitJoinInfo(
                         url: cleaned,
                         token: resp.token,

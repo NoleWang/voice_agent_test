@@ -138,6 +138,14 @@ enum DisputeCaseService {
         let fileURL = folderURL.appendingPathComponent(fileName)
         
         try data.write(to: fileURL, options: .atomic)
+        
+        // Log the exact save location
+        print("💾 Saved dispute case to:")
+        print("   Full path: \(fileURL.path)")
+        print("   Folder: \(folderURL.path)")
+        print("   Filename: \(fileName)")
+        print("   Category: \(categoryName)")
+        
         return fileURL
     }
     
@@ -188,6 +196,7 @@ enum DisputeCaseService {
     /// Load all saved dispute files as task items from current user's folder
     static func loadAllTasks() -> [TaskItem] {
         guard let username = getCurrentUsername() else {
+            print("⚠️ No username found in Keychain")
             return []
         }
         
@@ -197,12 +206,20 @@ enum DisputeCaseService {
         if let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
             let userDataFolder = docs.appendingPathComponent("UserData")
             let userFolder = userDataFolder.appendingPathComponent(username, isDirectory: true)
+            
+            print("🔍 Looking for tasks in: \(userFolder.path)")
+            
             if fm.fileExists(atPath: userFolder.path) {
                 if let categoryFolders = try? fm.contentsOfDirectory(at: userFolder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                    print("📁 Found \(categoryFolders.count) category folder(s)")
                     tasks.append(contentsOf: loadTasksFromFolders(categoryFolders: categoryFolders))
                 }
+            } else {
+                print("⚠️ User folder does not exist: \(userFolder.path)")
             }
         }
+        
+        print("✅ Loaded \(tasks.count) task(s) from Documents directory")
         
         // Sort by creation date, most recent first
         return tasks.sorted { $0.createdAt > $1.createdAt }
@@ -252,6 +269,7 @@ enum DisputeCaseService {
                         createdAt: createdAt
                     )
                     tasks.append(task)
+                    print("📄 Loaded task: \(file.lastPathComponent) - Merchant: \(disputeCase.dispute.merchant), Amount: \(disputeCase.dispute.amount)")
                 } catch {
                     print("⚠️ Failed to decode file \(file.lastPathComponent): \(error.localizedDescription)")
                 }

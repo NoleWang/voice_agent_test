@@ -55,7 +55,10 @@ class CustomerLLMAgent(Agent):
         super().__init__(instructions=self._system_prompt())
         self.profile: Profile = Profile()
         self.dispute: Dispute = Dispute()
+        # Load initial profile, but note that bootstrap payload will overwrite dispute data
         self._load_bootstrap_profile()
+        log.info("🔍 Agent initialized. Initial dispute: merchant=%s, amount=%s, last4=%s", 
+                 self.dispute.merchant, self.dispute.amount, self.dispute.last4)
         self._did_opening_line = False
 
     def _system_prompt(self) -> str:
@@ -206,9 +209,11 @@ class CustomerLLMAgent(Agent):
             if p.name != "profile.json" and not p.name.startswith(".")
         ]
         if not dispute_files:
+            log.info("🔍 No dispute files found in %s", user_folder)
             return {}
 
         latest_file = max(dispute_files, key=lambda p: p.stat().st_mtime)
+        log.info("🔍 Loading latest dispute file: %s (mtime: %s)", latest_file.name, latest_file.stat().st_mtime)
         data = self._read_json(latest_file)
         if not isinstance(data, dict):
             return {}
@@ -227,6 +232,9 @@ class CustomerLLMAgent(Agent):
                 self.profile.address = normalized_profile.get("address", self.profile.address)
                 self.profile.phone = normalized_profile.get("phone", self.profile.phone)
 
+        log.info("🔍 Loaded dispute from file: merchant=%s, amount=%s, last4=%s", 
+                 dispute_payload.get("merchant", ""), dispute_payload.get("amount", 0), 
+                 dispute_payload.get("last4", ""))
         return dispute_payload
 
     def _normalize_profile(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -277,13 +285,20 @@ class CustomerLLMAgent(Agent):
             self.dispute.summary = str(disp.get("summary", "") or "")
 
     def apply_runtime_payload(self, data: Dict[str, Any]) -> None:
+        log.info("🔄 Applying runtime payload")
+        log.info("🔄 Payload structure: %s", json.dumps(data, indent=2, default=str))
+        log.info("🔄 BEFORE apply: merchant=%s, amount=%s, last4=%s", 
+                 self.dispute.merchant, self.dispute.amount, self.dispute.last4)
         self._apply_bootstrap(data)
+        log.info("✅ AFTER apply: merchant=%s, amount=%s, currency=%s, last4=%s, reason=%s", 
+                 self.dispute.merchant, self.dispute.amount, self.dispute.currency, 
+                 self.dispute.last4, self.dispute.reason[:50] if self.dispute.reason else "")
 
-    async def resolve_tool_value(self, name: str) -> Optional[str]:
+    def resolve_tool_value_sync(self, name: str) -> Optional[str]:
         """
-        Resolve tool values directly without invoking the LiveKit tool wrapper.
-        Used by RoomIO when the model emits tool tags as plain text.
+        Synchronous version of resolve_tool_value for use in sync contexts.
         """
+        log.info("🔍 Resolving tool (sync): %s (merchant=%s, amount=%s)", name, self.dispute.merchant, self.dispute.amount)
         values = {
             "get_full_name": self._as_sentence("full_name", self.profile.full_name),
             "get_first_name": self._as_sentence("first_name", self.profile.first_name),
@@ -295,29 +310,50 @@ class CustomerLLMAgent(Agent):
             "get_txn_date": self._as_sentence("txn_date", self.dispute.txn_date),
             "get_amount": self._as_sentence(
                 "amount",
-                f"{self.dispute.amount:.2f}" if self.dispute.amount is not None else "",
+                f"{self.dispute.amount:.2f}" if self.dispute.amount is not None and self.dispute.amount > 0 else "",
             ),
             "get_currency": self._as_sentence("currency", self.dispute.currency),
             "get_merchant": self._as_sentence("merchant", self.dispute.merchant),
             "get_reason": self._as_sentence("reason", self.dispute.reason),
             "get_summary": self._as_sentence("summary", self.dispute.summary),
         }
-        return values.get(name)
+        result = values.get(name)
+        if result:
+            log.info("✅ Tool %s resolved to (sync): %s", name, result[:100])
+        else:
+            log.warning("⚠️ Tool %s not found in resolver map", name)
+        return result
+
+    async def resolve_tool_value(self, name: str) -> Optional[str]:
+        """
+        Resolve tool values directly without invoking the LiveKit tool wrapper.
+        Used by RoomIO when the model emits tool tags as plain text.
+        """
+        # Delegate to sync version since we don't do any async work
+        return self.resolve_tool_value_sync(name)
 
     def _normalize_dispute(self, data: Dict[str, Any]) -> Dict[str, Any]:
         dispute = data.get("dispute") if "dispute" in data else data
         if not isinstance(dispute, dict):
+            log.warning("⚠️ _normalize_dispute: dispute is not a dict, got: %r", type(dispute))
             return {}
 
-        return {
-            "summary": dispute.get("summary") or "",
-            "amount": dispute.get("amount", 0.0),
-            "currency": dispute.get("currency") or "USD",
-            "merchant": dispute.get("merchant") or "",
-            "txn_date": dispute.get("txn_date") or dispute.get("txnDate") or "",
-            "reason": dispute.get("reason") or "",
-            "last4": dispute.get("last4") or "",
+        # Handle both snake_case (from JSON encoding) and camelCase (direct dict access)
+        # Also check top-level keys in case dispute data is at root level
+        # iOS sends JSON with CodingKeys, so it should be snake_case, but handle both
+        normalized = {
+            "summary": dispute.get("summary") or data.get("summary") or "",
+            "amount": dispute.get("amount") or data.get("amount") or 0.0,
+            "currency": dispute.get("currency") or data.get("currency") or "USD",
+            "merchant": dispute.get("merchant") or dispute.get("merchantName") or data.get("merchant") or data.get("Merchant") or "",
+            "txn_date": dispute.get("txn_date") or dispute.get("txnDate") or data.get("txn_date") or data.get("txnDate") or "",
+            "reason": dispute.get("reason") or data.get("reason") or data.get("Reason") or "",
+            "last4": dispute.get("last4") or dispute.get("lastFour") or data.get("last4") or data.get("Last4") or "",
         }
+        log.info("🔍 _normalize_dispute: input keys=%s, result merchant=%s, amount=%s, last4=%s", 
+                 list(dispute.keys()) if isinstance(dispute, dict) else "N/A",
+                 normalized["merchant"], normalized["amount"], normalized["last4"])
+        return normalized
 
     # -------------------------
     # Helper: sentence rendering
