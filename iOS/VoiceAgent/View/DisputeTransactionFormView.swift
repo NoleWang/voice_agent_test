@@ -548,7 +548,7 @@ struct DisputeTransactionFormView: View {
             
             print("✅ Successfully saved dispute case")
             print("   File saved at: \(savedURL.path)")
-            print("   You can find it in: ../UserData/[your_username]/\(categoryName)/")
+            print("   You can find it in: Documents/UserData/[your_username]/\(categoryName)/")
 
             NotificationCenter.default.post(name: NSNotification.Name("TaskListNeedsUpdate"), object: nil)
             NotificationCenter.default.post(name: NSNotification.Name("DismissToServiceCategory"), object: nil)
