@@ -162,12 +162,55 @@ class CustomerLLMAgent(Agent):
                 return root
             log.warning("VOICE_AGENT_USERDATA_DIR not found: %s", root)
 
+        simulator_root = self._find_simulator_user_data_root()
+        if simulator_root is not None:
+            return simulator_root
+
         repo_root = Path(__file__).resolve().parents[1]
         repo_user_data = repo_root / "iOS" / "VoiceAgent" / "UserData"
-        if repo_user_data.exists():
+        if self._latest_payload_mtime(repo_user_data) is not None:
             return repo_user_data
 
         return None
+
+    def _find_simulator_user_data_root(self) -> Optional[Path]:
+        simulator_root = Path.home() / "Library" / "Developer" / "CoreSimulator" / "Devices"
+        if not simulator_root.exists():
+            return None
+
+        user_data_dirs = list(
+            simulator_root.glob(
+                "*/data/Containers/Data/Application/*/Documents/UserData"
+            )
+        )
+        if not user_data_dirs:
+            return None
+
+        candidates = [
+            (user_data_dir, self._latest_payload_mtime(user_data_dir))
+            for user_data_dir in user_data_dirs
+        ]
+        candidates = [(path, mtime) for path, mtime in candidates if mtime is not None]
+        if not candidates:
+            return None
+
+        latest_dir = max(candidates, key=lambda item: item[1])[0]
+        log.info("🔍 Using simulator UserData folder: %s", latest_dir)
+        return latest_dir
+
+    def _latest_payload_mtime(self, user_data_root: Path) -> Optional[float]:
+        if not user_data_root.exists():
+            return None
+
+        json_files = [
+            p
+            for p in user_data_root.rglob("*.json")
+            if not p.name.startswith(".")
+        ]
+        if not json_files:
+            return None
+
+        return max(p.stat().st_mtime for p in json_files)
 
     def _resolve_user_folder(self, user_data_root: Path) -> Optional[Path]:
         preferred_user = os.getenv("VOICE_AGENT_USER", "").strip()
