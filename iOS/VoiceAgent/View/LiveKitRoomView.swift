@@ -161,16 +161,16 @@ struct LiveKitRoomView: View {
                 .font(.headline)
                 .padding(.horizontal)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("1. Call your bank from the Phone app (or tap below).")
-                Text("   (The bank will see your personal phone number.)")
-                Text("2. After the bank answers, tap “Add Call”.")
-                Text("3. Dial the LiveKit number and wait for it to answer.")
-                Text("4. Merge the calls so the agent hears both sides.")
-            }
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal)
+//            VStack(alignment: .leading, spacing: 10) {
+//                Text("1. Call your bank from the Phone app (or tap below).")
+//                Text("   (The bank will see your personal phone number.)")
+//                Text("2. After the bank answers, tap “Add Call”.")
+//                Text("3. Dial the LiveKit number and wait for it to answer.")
+//                Text("4. Merge the calls so the agent hears both sides.")
+//            }
+//            .font(.subheadline)
+//            .foregroundStyle(.secondary)
+//            .padding(.horizontal)
 
             VStack(spacing: 10) {
                 callButton(title: "Call Bank", number: bankPhone, color: .blue)
