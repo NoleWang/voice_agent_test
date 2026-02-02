@@ -347,7 +347,7 @@ extension LiveKitManager: RoomDelegate {
     }
 
     /// Compatibility with older/newer SDKs that omit encryptionType.
-    @objc
+    @nonobjc
     nonisolated func room(_ room: Room,
                           participant: RemoteParticipant?,
                           didReceiveData data: Data,
@@ -358,7 +358,7 @@ extension LiveKitManager: RoomDelegate {
     }
 
     /// Some builds surface a nil/optional topic; handle it defensively.
-    @objc
+    @nonobjc
     nonisolated func room(_ room: Room,
                           participant: RemoteParticipant?,
                           didReceiveData data: Data,
