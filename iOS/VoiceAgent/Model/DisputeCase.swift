@@ -25,6 +25,7 @@ struct Bank: Identifiable, Codable {
         Bank(id: "tdbank", name: "TD Bank", phoneNumber: "1-888-751-9000"),
         Bank(id: "bbt", name: "BB&T (Truist)", phoneNumber: "1-800-226-5228"),
         Bank(id: "suntrust", name: "SunTrust (Truist)", phoneNumber: "1-800-786-8787"),
+        Bank(id: "Test", name: "testname", phoneNumber: "1-469-992-7878"),
         
         // Chinese Banks
         Bank(id: "icbc", name: "中国工商银行 (ICBC)", phoneNumber: "95588"),
