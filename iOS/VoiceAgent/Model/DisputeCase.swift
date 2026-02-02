@@ -157,7 +157,7 @@ enum DisputeCaseService {
         return userInfo.username
     }
     
-    /// Ensure the category folder exists under user's folder in Documents/UserData
+    /// Ensure the category folder exists under ../UserData/[username]/[categoryName]
     private static func ensureFolder(categoryName: String) throws -> URL {
         guard let username = getCurrentUsername() else {
             throw NSError(
@@ -167,14 +167,15 @@ enum DisputeCaseService {
             )
         }
 
-        return try ensureFolderInDocuments(username: username, categoryName: categoryName)
+        return try ensureFolderInUserData(username: username, categoryName: categoryName)
     }
-    
-    /// Fallback: Ensure the category folder exists under Documents: UserData/[username]/[categoryName]
-    private static func ensureFolderInDocuments(username: String, categoryName: String) throws -> URL {
+
+    /// Ensure the category folder exists under ../UserData/[username]/[categoryName]
+    private static func ensureFolderInUserData(username: String, categoryName: String) throws -> URL {
         let fm = FileManager.default
-        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let userDataFolder = docs.appendingPathComponent("UserData", isDirectory: true)
+        let currentDirectory = URL(fileURLWithPath: fm.currentDirectoryPath)
+        let userDataFolder = URL(fileURLWithPath: "../UserData", relativeTo: currentDirectory)
+            .standardizedFileURL
         let userFolder = userDataFolder.appendingPathComponent(username, isDirectory: true)
         let categoryFolder = userFolder.appendingPathComponent(categoryName, isDirectory: true)
         
@@ -203,23 +204,23 @@ enum DisputeCaseService {
         let fm = FileManager.default
         var tasks: [TaskItem] = []
 
-        if let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
-            let userDataFolder = docs.appendingPathComponent("UserData")
-            let userFolder = userDataFolder.appendingPathComponent(username, isDirectory: true)
-            
-            print("🔍 Looking for tasks in: \(userFolder.path)")
-            
-            if fm.fileExists(atPath: userFolder.path) {
-                if let categoryFolders = try? fm.contentsOfDirectory(at: userFolder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-                    print("📁 Found \(categoryFolders.count) category folder(s)")
-                    tasks.append(contentsOf: loadTasksFromFolders(categoryFolders: categoryFolders))
-                }
-            } else {
-                print("⚠️ User folder does not exist: \(userFolder.path)")
+        let currentDirectory = URL(fileURLWithPath: fm.currentDirectoryPath)
+        let userDataFolder = URL(fileURLWithPath: "../UserData", relativeTo: currentDirectory)
+            .standardizedFileURL
+        let userFolder = userDataFolder.appendingPathComponent(username, isDirectory: true)
+        
+        print("🔍 Looking for tasks in: \(userFolder.path)")
+        
+        if fm.fileExists(atPath: userFolder.path) {
+            if let categoryFolders = try? fm.contentsOfDirectory(at: userFolder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                print("📁 Found \(categoryFolders.count) category folder(s)")
+                tasks.append(contentsOf: loadTasksFromFolders(categoryFolders: categoryFolders))
             }
+        } else {
+            print("⚠️ User folder does not exist: \(userFolder.path)")
         }
         
-        print("✅ Loaded \(tasks.count) task(s) from Documents directory")
+        print("✅ Loaded \(tasks.count) task(s) from ../UserData")
         
         // Sort by creation date, most recent first
         return tasks.sorted { $0.createdAt > $1.createdAt }
