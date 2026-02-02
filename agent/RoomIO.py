@@ -603,8 +603,6 @@ def _install_chat_listener(room: Any) -> None:
     async def _handle_packet(packet: Any, participant: Any | None = None) -> None:
         try:
             topic = getattr(packet, "topic", None) or getattr(packet, "destination_topic", None)
-            if topic not in {CHAT_TOPIC, BOOTSTRAP_TOPIC}:
-                return
 
             raw = getattr(packet, "data", None) or getattr(packet, "payload", None)
             if raw is None:
@@ -618,7 +616,33 @@ def _install_chat_listener(room: Any) -> None:
             except Exception:
                 obj = None
 
-            if topic == BOOTSTRAP_TOPIC:
+            normalized_topic = (topic or "").strip()
+            inferred_topic = normalized_topic
+            if not inferred_topic:
+                if isinstance(obj, dict):
+                    if "text" in obj or "message" in obj:
+                        inferred_topic = CHAT_TOPIC
+                    elif any(
+                        key in obj
+                        for key in (
+                            "profile",
+                            "dispute",
+                            "summary",
+                            "amount",
+                            "currency",
+                            "merchant",
+                            "reason",
+                            "last4",
+                            "txn_date",
+                        )
+                    ):
+                        inferred_topic = BOOTSTRAP_TOPIC
+                if not inferred_topic:
+                    inferred_topic = CHAT_TOPIC
+            elif inferred_topic not in {CHAT_TOPIC, BOOTSTRAP_TOPIC}:
+                return
+
+            if inferred_topic == BOOTSTRAP_TOPIC:
                 agent = getattr(room, "_agent_instance", None)
                 if agent is None:
                     log.warning("📩 bootstrap payload received, but no agent is attached")

@@ -345,4 +345,26 @@ extension LiveKitManager: RoomDelegate {
             self.handleIncomingData(data, participant: participant, topic: topic)
         }
     }
+
+    /// Compatibility with older/newer SDKs that omit encryptionType.
+    @objc
+    nonisolated func room(_ room: Room,
+                          participant: RemoteParticipant?,
+                          didReceiveData data: Data,
+                          forTopic topic: String) {
+        Task { @MainActor in
+            self.handleIncomingData(data, participant: participant, topic: topic)
+        }
+    }
+
+    /// Some builds surface a nil/optional topic; handle it defensively.
+    @objc
+    nonisolated func room(_ room: Room,
+                          participant: RemoteParticipant?,
+                          didReceiveData data: Data,
+                          forTopic topic: String?) {
+        Task { @MainActor in
+            self.handleIncomingData(data, participant: participant, topic: topic)
+        }
+    }
 }
