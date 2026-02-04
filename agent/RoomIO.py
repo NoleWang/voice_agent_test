@@ -687,7 +687,6 @@ async def _try_inject_text_into_session(session: AgentSession, text: str) -> boo
         ("submit_text", {"text": text}),
         ("receive_text", {"text": text}),
         ("chat", {"text": text}),
-        ("say", {"text": text}),  # last resort (may speak)
     ]
 
     for name, kwargs in candidates:
@@ -768,13 +767,15 @@ def _install_chat_listener(room: Any) -> None:
 
             if inferred_topic == BOOTSTRAP_TOPIC:
                 agent = getattr(room, "_agent_instance", None)
-                if agent is None:
-                    log.warning("📩 bootstrap payload received, but no agent is attached")
-                    return
                 if not isinstance(obj, dict):
                     log.warning("📩 bootstrap payload received, but payload is not JSON")
                     return
                 try:
+                    if agent is None:
+                        # Stash until agent is attached.
+                        setattr(room, "_pending_bootstrap_payload", obj)
+                        log.warning("📩 bootstrap payload received, but no agent is attached (stashed).")
+                        return
                     log.info("📩 Received bootstrap payload with keys: %s", list(obj.keys()))
                     if "dispute" in obj and isinstance(obj["dispute"], dict):
                         log.info("📩 Bootstrap dispute data: merchant=%s, amount=%s, last4=%s", 
@@ -795,14 +796,81 @@ def _install_chat_listener(room: Any) -> None:
             pid = getattr(participant, "identity", None) or getattr(participant, "sid", None) or "unknown"
             log.info("📩 iOS chat DataPacket (from=%s pid=%s): %s", from_name, pid, text_for_log)
 
+            # Prevent feedback loops:
+            # - ignore packets sent by this local participant
+            # - ignore packets explicitly marked as agent messages
+            local_identity = (
+                getattr(getattr(room, "local_participant", None), "identity", None)
+                or getattr(getattr(room, "local_participant", None), "sid", None)
+            )
+            from_name_norm = str(from_name or "").strip().lower()
+            agent_label_norm = (os.getenv("AGENT_LABEL", "agent") or "agent").strip().lower()
+            pid_norm = str(pid or "").strip().lower()
+            local_identity_norm = str(local_identity or "").strip().lower()
+
+            if local_identity_norm and pid_norm == local_identity_norm:
+                log.debug("Skipping local self-sent chat packet (pid=%s)", pid)
+                return
+
+            if from_name_norm in {"agent", agent_label_norm} or pid_norm.startswith("agent-"):
+                log.debug("Skipping agent-originated chat packet to avoid loop (from=%s pid=%s)", from_name, pid)
+                return
+
+            # Operator override: typed chat from iOS (explicitly marked) should be spoken by the agent.
+            ios_user_label_norm = (os.getenv("IOS_USER_LABEL", "iOS User") or "iOS User").strip().lower()
+            allow_override = bool(obj and isinstance(obj, dict) and obj.get("override") is True)
+            if from_name_norm == ios_user_label_norm and allow_override:
+                def _is_primary_agent(room: Any) -> bool:
+                    local = getattr(getattr(room, "local_participant", None), "identity", None)
+                    if isinstance(local, bytes):
+                        local_id = local.decode("utf-8", errors="ignore")
+                    else:
+                        local_id = str(local or "")
+
+                    agent_ids: list[str] = []
+                    remote = getattr(room, "remote_participants", None)
+                    if isinstance(remote, dict):
+                        for p in remote.values():
+                            rid = getattr(p, "identity", None) or getattr(p, "sid", None) or ""
+                            if isinstance(rid, bytes):
+                                rid = rid.decode("utf-8", errors="ignore")
+                            rid = str(rid)
+                            if rid.startswith("agent-"):
+                                agent_ids.append(rid)
+
+                    if local_id.startswith("agent-"):
+                        agent_ids.append(local_id)
+
+                    if not agent_ids:
+                        return True
+                    return local_id == sorted(set(agent_ids))[0]
+
+                if not _is_primary_agent(room):
+                    log.debug("Operator override ignored on non-primary agent.")
+                    return
+
+                session: Optional[AgentSession] = getattr(room, "_typed_chat_session", None)
+                if session is not None and hasattr(session, "say"):
+                    try:
+                        await session.say(str(text_for_log))
+                        log.info("✅ operator override: session.say(...)")
+                        return
+                    except Exception as e:
+                        log.warning("Operator override speak failed: %r", e)
+
+                # Fallback: at least show as agent in chat if no session is ready.
+                await publish_chat(room, os.getenv("AGENT_LABEL", "agent"), str(text_for_log))
+                log.info("✅ operator override: published chat only (no session)")
+                return
+
             session: Optional[AgentSession] = getattr(room, "_typed_chat_session", None)
             if session is not None:
                 injected = await _try_inject_text_into_session(session, str(text_for_log))
                 if injected:
                     return
 
-            # fallback echo
-            await publish_chat(room, os.getenv("AGENT_LABEL", "agent"), f"Echo: {text_for_log}")
+            # No fallback echo; avoids duplicate/noisy chat messages.
+            log.info("No typed-chat injection API available; message not echoed.")
 
         except Exception as e:
             log.exception("chat listener error: %r", e)
@@ -988,6 +1056,114 @@ async def _move_participant(lk: api.LiveKitAPI, from_room: str, identity: str, t
     return False
 
 
+async def _ensure_agent_dispatched_to_room(lk: api.LiveKitAPI, room_name: str) -> bool:
+    """
+    Ensure an agent job is dispatched to `room_name` so the conversation entrypoint runs.
+    """
+    dispatch_svc = getattr(lk, "agent_dispatch", None)
+    create_req_cls = getattr(api, "CreateAgentDispatchRequest", None)
+    list_req_cls = getattr(api, "ListAgentDispatchRequest", None)
+    if dispatch_svc is None or create_req_cls is None:
+        log.warning("Agent dispatch API unavailable; cannot dispatch room '%s'.", room_name)
+        return False
+
+    try:
+        if list_req_cls is not None and hasattr(dispatch_svc, "list_dispatch"):
+            listed = await dispatch_svc.list_dispatch(list_req_cls(room=room_name))
+            existing = list(getattr(listed, "agent_dispatches", []) or [])
+            if existing:
+                log.info("Agent dispatch already exists for room '%s' (%d dispatch(es)).", room_name, len(existing))
+                return True
+    except Exception as e:
+        log.warning("Failed to list agent dispatches for room '%s': %r", room_name, e)
+
+    agent_name = (os.getenv("LIVEKIT_AGENT_NAME", "") or os.getenv("AGENT_NAME", "")).strip()
+    metadata = json.dumps({"source": "sip-router", "room": room_name})
+    kwargs: dict[str, Any] = {"room": room_name, "metadata": metadata}
+    if agent_name:
+        kwargs["agent_name"] = agent_name
+
+    try:
+        req = create_req_cls(**kwargs)
+    except Exception:
+        req = create_req_cls(room=room_name)
+        if agent_name:
+            with contextlib.suppress(Exception):
+                setattr(req, "agent_name", agent_name)
+        with contextlib.suppress(Exception):
+            setattr(req, "metadata", metadata)
+
+    create_fn = getattr(dispatch_svc, "create_dispatch", None)
+    if not callable(create_fn):
+        log.warning("Agent dispatch service missing create_dispatch for room '%s'.", room_name)
+        return False
+
+    try:
+        out = await create_fn(req)
+        dispatch_id = getattr(out, "id", None) or getattr(out, "dispatch_id", None)
+        log.info("Created agent dispatch for room '%s' (dispatch_id=%s, agent_name=%s).", room_name, dispatch_id, agent_name or "<any>")
+        return True
+    except Exception as e:
+        log.warning("Failed to create agent dispatch for room '%s': %r", room_name, e)
+        return False
+
+
+async def _room_has_agent_participant(lk: api.LiveKitAPI, room_name: str) -> bool:
+    room_svc = getattr(lk, "room", None) or getattr(lk, "room_service", None)
+    req_cls = getattr(api, "ListParticipantsRequest", None)
+    if room_svc is None or req_cls is None:
+        return False
+
+    list_fn = getattr(room_svc, "list_participants", None)
+    if not callable(list_fn):
+        return False
+
+    try:
+        out = await list_fn(req_cls(room=room_name))
+        participants = list(getattr(out, "participants", []) or [])
+        for p in participants:
+            state_val = getattr(p, "state", None)
+            state_name = str(getattr(state_val, "name", state_val)).upper()
+            if state_name and state_name not in {"JOINED", "ACTIVE"}:
+                continue
+            pid = (
+                getattr(p, "identity", None)
+                or getattr(p, "sid", None)
+                or ""
+            )
+            pid_norm = str(pid).strip().lower()
+            if pid_norm.startswith("agent-"):
+                return True
+    except Exception as e:
+        log.warning("Failed to inspect participants for room '%s': %r", room_name, e)
+    return False
+
+
+async def _dispatch_if_needed_after_move(
+    lk: api.LiveKitAPI, room_name: str, dispatched_rooms: set[str]
+) -> None:
+    if room_name in dispatched_rooms:
+        return
+
+    # Optional guard: skip explicit dispatch when an active agent is already present.
+    # Default is ON to avoid duplicate agents when auto-dispatch already occurred.
+    skip_if_agent_present = os.getenv("SKIP_EXPLICIT_DISPATCH_IF_AGENT_PRESENT", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if skip_if_agent_present:
+        await asyncio.sleep(1.0)
+        if await _room_has_agent_participant(lk, room_name):
+            log.info("Room '%s' already has an agent participant; explicit dispatch skipped.", room_name)
+            return
+
+    dispatched_ok = await _ensure_agent_dispatched_to_room(lk, room_name)
+    if dispatched_ok:
+        dispatched_rooms.add(room_name)
+
+
 async def _run_sip_router(ctx: JobContext) -> None:
     log.info("SIP router connected. Room=%s", ctx.room)
 
@@ -998,6 +1174,7 @@ async def _run_sip_router(ctx: JobContext) -> None:
     lk = api.LiveKitAPI(livekit_url, api_key, api_secret)
     buffers: dict[str, str] = {}
     moved_participants: set[str] = set()
+    dispatched_rooms: set[str] = set()
     fallback_scheduled: set[str] = set()
 
     def _safe_repr(val: Any, limit: int = 300) -> str:
@@ -1021,6 +1198,7 @@ async def _run_sip_router(ctx: JobContext) -> None:
         log.info("Move participant %s -> %s (ok=%s)", participant_id, dest_room, ok)
         if ok:
             moved_participants.add(str(participant_id))
+            await _dispatch_if_needed_after_move(lk, dest_room, dispatched_rooms)
 
     async def _handle_dtmf(*args, **kwargs) -> None:
         log.info("DTMF callback fired. args=%s kwargs=%s", _safe_repr(args), _safe_repr(kwargs))
@@ -1083,6 +1261,7 @@ async def _run_sip_router(ctx: JobContext) -> None:
         log.info("Fallback move participant %s -> %s (ok=%s)", participant_id, latest_room, ok)
         if ok:
             moved_participants.add(str(participant_id))
+            await _dispatch_if_needed_after_move(lk, latest_room, dispatched_rooms)
 
     def _schedule_fallback(participant_id: Optional[str]) -> None:
         if not participant_id:
@@ -1251,6 +1430,14 @@ async def _run_conversation(ctx: JobContext) -> None:
     # Agent persona
     agent = CustomerLLMAgent()
     setattr(ctx.room, "_agent_instance", agent)
+    pending_bootstrap = getattr(ctx.room, "_pending_bootstrap_payload", None)
+    if isinstance(pending_bootstrap, dict):
+        try:
+            log.info("📩 Applying stashed bootstrap payload after agent attach.")
+            agent.apply_runtime_payload(pending_bootstrap)
+            setattr(ctx.room, "_pending_bootstrap_payload", None)
+        except Exception as e:
+            log.warning("Failed to apply stashed bootstrap payload: %r", e)
 
     # Session
     session = AgentSession(stt=stt, tts=tts, vad=vad, llm=llm)
@@ -1343,11 +1530,18 @@ def _run_worker_blocking(command: str = "start") -> None:
     # For embedded usage: prefer "start" (no watch/hotreload) to avoid timeouts.
     # For manual development: you can run `python RoomIO.py dev`.
     old_argv = list(sys.argv)
+    raw_port = (os.getenv("LIVEKIT_WORKER_PORT", "0") or "0").strip()
+    try:
+        worker_port = int(raw_port)
+    except Exception:
+        log.warning("Invalid LIVEKIT_WORKER_PORT='%s', falling back to 0.", raw_port)
+        worker_port = 0
     try:
         sys.argv = ["livekit-worker", command, "--log-level", os.getenv("LIVEKIT_LOG_LEVEL", "DEBUG")]
         # Now running in subprocess, which is the main thread of that process
         # This allows signal handlers to work correctly
-        cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+        log.info("Starting LiveKit worker (command=%s, http_port=%d)", command, worker_port)
+        cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, port=worker_port))
     except KeyboardInterrupt:
         # Handle interrupt gracefully
         log.info("Worker interrupted")

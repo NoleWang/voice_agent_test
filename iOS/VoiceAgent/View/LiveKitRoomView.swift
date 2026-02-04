@@ -26,6 +26,7 @@ struct LiveKitRoomView: View {
 
     // Use something stable; ideally pass from login/profile
     private let displayName = "iOS User"
+    @State private var sendAsOverride: Bool = true
     private let liveKitPhoneNumber = AppConfig.liveKitPhoneNumber
 
     // MARK: - Initializers
@@ -143,11 +144,18 @@ struct LiveKitRoomView: View {
     private var inputBar: some View {
         let trimmed = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
         return HStack(spacing: 10) {
+            Button {
+                sendAsOverride.toggle()
+            } label: {
+                Image(systemName: sendAsOverride ? "megaphone.fill" : "person.fill")
+            }
+            .accessibilityLabel(sendAsOverride ? "Send as agent override" : "Send as user")
+
             TextField("Type a message…", text: $messageText, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
 
             Button {
-                manager.sendChat(text: trimmed, displayName: displayName)
+                manager.sendChat(text: trimmed, displayName: displayName, asOverride: sendAsOverride)
                 messageText = ""
             } label: {
                 Image(systemName: "paperplane.fill")
@@ -164,18 +172,18 @@ struct LiveKitRoomView: View {
                 .font(.headline)
                 .padding(.horizontal)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("1. Call your bank from the Phone app (or tap below).")
-                Text("2. After the bank answers, tap “Add Call”.")
-                Text("3. Dial the LiveKit number and wait for it to answer.")
-                if let code = shortCode, !code.isEmpty {
-                    Text("4. Enter code \(code), then press #.")
-                }
-                Text("5. Merge the calls so the agent hears both sides.")
-            }
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal)
+//            VStack(alignment: .leading, spacing: 10) {
+//                Text("1. Call your bank from the Phone app (or tap below).")
+//                Text("2. After the bank answers, tap “Add Call”.")
+//                Text("3. Dial the LiveKit number and wait for it to answer.")
+//                if let code = shortCode, !code.isEmpty {
+//                    Text("4. Enter code \(code), then press #.")
+//                }
+//                Text("5. Merge the calls so the agent hears both sides.")
+//            }
+//            .font(.subheadline)
+//            .foregroundStyle(.secondary)
+//            .padding(.horizontal)
 
             VStack(spacing: 10) {
                 callButton(title: "Call Bank", number: bankPhone, color: .blue)

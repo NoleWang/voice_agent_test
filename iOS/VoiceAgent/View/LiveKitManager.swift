@@ -33,6 +33,7 @@ final class LiveKitManager: ObservableObject {
     private let bootstrapTopic = "bootstrap"
 
     var pendingBootstrapPayload: LiveKitBootstrapPayload?
+    private var latestBootstrapPayload: LiveKitBootstrapPayload?
 
     // MARK: - Audio
     private let audioSession = AVAudioSession.sharedInstance()
@@ -99,7 +100,7 @@ final class LiveKitManager: ObservableObject {
 
     // MARK: - Chat (send)
 
-    func sendChat(text: String, displayName: String) {
+    func sendChat(text: String, displayName: String, asOverride: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -110,7 +111,14 @@ final class LiveKitManager: ObservableObject {
                 let encoder = JSONEncoder()
                 encoder.dateEncodingStrategy = .secondsSince1970
 
-                let data = try encoder.encode(msg)
+                let data: Data
+                if asOverride, let base = try? JSONSerialization.jsonObject(with: encoder.encode(msg)) as? [String: Any] {
+                    var payload = base
+                    payload["override"] = true
+                    data = try JSONSerialization.data(withJSONObject: payload)
+                } else {
+                    data = try encoder.encode(msg)
+                }
                 let opts = DataPublishOptions(topic: chatTopic, reliable: true)
 
                 try await room.localParticipant.publish(data: data, options: opts)
@@ -130,6 +138,7 @@ final class LiveKitManager: ObservableObject {
             let data = try encoder.encode(payload)
             let opts = DataPublishOptions(topic: bootstrapTopic, reliable: true)
             try await room.localParticipant.publish(data: data, options: opts)
+            latestBootstrapPayload = payload
             print("📤 iOS sent bootstrap payload")
         } catch {
             errorMessage = "Bootstrap send failed: \(error.localizedDescription)"
@@ -139,6 +148,11 @@ final class LiveKitManager: ObservableObject {
     private func sendPendingBootstrapPayload() async {
         guard let payload = pendingBootstrapPayload else { return }
         pendingBootstrapPayload = nil
+        await sendBootstrapPayload(payload)
+    }
+
+    private func resendBootstrapPayloadIfAvailable() async {
+        guard let payload = latestBootstrapPayload ?? pendingBootstrapPayload else { return }
         await sendBootstrapPayload(payload)
     }
 
@@ -327,7 +341,10 @@ extension LiveKitManager: RoomDelegate {
     }
 
     nonisolated func room(_ room: Room, participantDidConnect participant: RemoteParticipant) {
-        Task { @MainActor in self.refreshParticipants() }
+        Task { @MainActor in
+            self.refreshParticipants()
+            await self.resendBootstrapPayloadIfAvailable()
+        }
     }
 
     nonisolated func room(_ room: Room, participantDidDisconnect participant: RemoteParticipant) {
