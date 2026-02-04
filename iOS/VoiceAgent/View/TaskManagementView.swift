@@ -213,6 +213,7 @@ struct TaskDetailView: View {
         let id = UUID()
         let url: String
         let token: String
+        let code: String
         let bankPhoneNumber: String?
         let bootstrapPayload: LiveKitBootstrapPayload?
     }
@@ -303,13 +304,14 @@ struct TaskDetailView: View {
             }
             .fullScreenCover(item: $joinInfo) { info in
                 NavigationView {
-                    LiveKitRoomView(
-                        manager: liveKitManager,
-                        roomUrl: info.url,
-                        token: info.token,
-                        bankPhoneNumber: info.bankPhoneNumber,
-                        bootstrapPayload: info.bootstrapPayload
-                    )
+                        LiveKitRoomView(
+                            manager: liveKitManager,
+                            roomUrl: info.url,
+                            token: info.token,
+                            shortCode: info.code,
+                            bankPhoneNumber: info.bankPhoneNumber,
+                            bootstrapPayload: info.bootstrapPayload
+                        )
                 }
             }
         }
@@ -1070,17 +1072,15 @@ struct TaskDetailView: View {
             defer { Task { @MainActor in isStartingRoom = false } }
 
             do {
-                let roomName = AppConfig.liveKitRoom
                 let identity = "customer_\(profile.first_name.lowercased())_\(profile.last_name.lowercased())"
                 let name = "\(profile.first_name) \(profile.last_name)"
 
-                let resp = try await LiveKitTokenAPI.fetchToken(
-                    room: roomName,
+                let resp = try await LiveKitTokenAPI.fetchSession(
                     identity: identity,
                     name: name
                 )
 
-                let candidate = (resp.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let candidate = resp.url.trimmingCharacters(in: .whitespacesAndNewlines)
                 let rawUrl: String = {
                     if candidate.isEmpty || candidate == "wss://" || candidate == "ws://" {
                         return AppConfig.liveKitURL
@@ -1126,6 +1126,7 @@ struct TaskDetailView: View {
                     self.joinInfo = LiveKitJoinInfo(
                         url: cleaned,
                         token: resp.token,
+                        code: resp.code,
                         bankPhoneNumber: bankPhoneNumber,
                         bootstrapPayload: bootstrapPayload
                     )

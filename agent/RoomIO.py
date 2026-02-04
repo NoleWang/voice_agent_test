@@ -28,6 +28,9 @@ import multiprocessing
 from pathlib import Path
 from typing import Any, Optional, AsyncIterator
 import re
+import uuid
+import secrets
+import sqlite3
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -36,7 +39,7 @@ from pydantic import BaseModel
 from livekit.agents import AgentSession, JobContext, WorkerOptions, cli, RoomInputOptions
 from livekit.plugins.aws import stt as aws_stt, tts as aws_tts
 from livekit.plugins import silero, noise_cancellation, aws
-from livekit import api
+from livekit import api, rtc
 
 from customer_agent import CustomerLLMAgent
 
@@ -51,6 +54,122 @@ log = logging.getLogger("fraud-dispute-agent:llm")
 CHAT_TOPIC = "chat"
 BOOTSTRAP_TOPIC = "bootstrap"
 TOOL_CALL_PATTERN = re.compile(r"<function=([a-zA-Z0-9_]+)>", re.MULTILINE)
+ROOM_PREFIX = os.getenv("SESSION_ROOM_PREFIX", "case-")
+SIP_LOBBY_ROOM = os.getenv("SIP_LOBBY_ROOM", "sip-lobby")
+SESSION_CODE_LEN = int(os.getenv("SESSION_CODE_LEN", "6"))
+SESSION_CODE_TTL_SEC = int(os.getenv("SESSION_CODE_TTL_SEC", "900"))
+SESSION_STORE_PATH = os.getenv("SESSION_STORE_PATH", "/tmp/livekit_session_codes.sqlite3")
+
+
+class SessionCodeStore:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._db_path = SESSION_STORE_PATH
+        self._ensure_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_schema(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_codes (
+                    code TEXT PRIMARY KEY,
+                    room TEXT NOT NULL,
+                    expires_at REAL NOT NULL,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_rooms (
+                    room TEXT PRIMARY KEY,
+                    expires_at REAL NOT NULL,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_session_codes_expires ON session_codes(expires_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_session_rooms_expires ON session_rooms(expires_at)")
+            conn.commit()
+
+    def _cleanup(self, conn: sqlite3.Connection, now: float) -> None:
+        conn.execute("DELETE FROM session_codes WHERE expires_at <= ?", (now,))
+        conn.execute("DELETE FROM session_rooms WHERE expires_at <= ?", (now,))
+
+    def generate_code(self) -> str:
+        rng = secrets.SystemRandom()
+        return "".join(str(rng.randrange(10)) for _ in range(SESSION_CODE_LEN))
+
+    def create(self, room: str) -> str:
+        now = time.time()
+        expires_at = now + SESSION_CODE_TTL_SEC
+        with self._lock:
+            with self._connect() as conn:
+                self._cleanup(conn, now)
+                conn.execute(
+                    """
+                    INSERT INTO session_rooms(room, expires_at, created_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(room) DO UPDATE SET
+                        expires_at=excluded.expires_at,
+                        created_at=excluded.created_at
+                    """,
+                    (room, expires_at, now),
+                )
+                for _ in range(50):
+                    code = self.generate_code()
+                    try:
+                        conn.execute(
+                            "INSERT INTO session_codes(code, room, expires_at, created_at) VALUES (?, ?, ?, ?)",
+                            (code, room, expires_at, now),
+                        )
+                        conn.commit()
+                        return code
+                    except sqlite3.IntegrityError:
+                        continue
+        raise RuntimeError("Unable to allocate unique session code")
+
+    def resolve(self, code: str) -> Optional[str]:
+        now = time.time()
+        with self._lock:
+            with self._connect() as conn:
+                self._cleanup(conn, now)
+                row = conn.execute(
+                    "SELECT room, expires_at FROM session_codes WHERE code = ?",
+                    (code,),
+                ).fetchone()
+                conn.execute("DELETE FROM session_codes WHERE code = ?", (code,))
+                conn.commit()
+        if row is None:
+            return None
+        if float(row["expires_at"]) <= now:
+            return None
+        return str(row["room"])
+
+    def latest_room(self) -> Optional[str]:
+        now = time.time()
+        with self._lock:
+            with self._connect() as conn:
+                self._cleanup(conn, now)
+                row = conn.execute(
+                    """
+                    SELECT room
+                    FROM session_rooms
+                    WHERE expires_at > ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (now,),
+                ).fetchone()
+        return None if row is None else str(row["room"])
+
+
+_session_codes = SessionCodeStore()
 
 
 # ---------------------------------------------------------------------
@@ -112,6 +231,11 @@ _patch_livekit_json_parsers()
 # ---------------------------------------------------------------------
 class TokenRequest(BaseModel):
     room: str
+    identity: str
+    name: str | None = None
+
+
+class SessionRequest(BaseModel):
     identity: str
     name: str | None = None
 
@@ -722,8 +846,345 @@ def _install_chat_listener(room: Any) -> None:
 # ---------------------------------------------------------------------
 # LiveKit agent entrypoint
 # ---------------------------------------------------------------------
-async def entrypoint(ctx: JobContext):
-    await ctx.connect()
+def _get_room_name(ctx: JobContext) -> str:
+    try:
+        job_room = getattr(getattr(ctx, "job", None), "room", None)
+        name = getattr(job_room, "name", None)
+        if isinstance(name, str) and name:
+            return name
+    except Exception:
+        pass
+    try:
+        name = getattr(getattr(ctx, "room", None), "name", None)
+        if isinstance(name, str) and name:
+            return name
+    except Exception:
+        pass
+    return ""
+
+
+async def _safe_ctx_shutdown(ctx: JobContext, reason: str) -> None:
+    """
+    Compatibility wrapper: some SDK versions expose ctx.shutdown as sync, others async.
+    """
+    try:
+        maybe = ctx.shutdown(reason=reason)
+        if inspect.isawaitable(maybe):
+            await maybe
+    except Exception as e:
+        log.warning("ctx.shutdown failed (reason=%s): %r", reason, e)
+
+
+def _parse_dtmf_event(*args, **kwargs) -> tuple[Optional[str], Optional[str]]:
+    digit = None
+    participant = None
+    participant_identity = None
+
+    def _maybe_set_digit(val: Any) -> None:
+        nonlocal digit
+        if isinstance(val, str) and len(val) >= 1 and digit is None:
+            digit = val[0]
+
+    def _maybe_set_participant(val: Any) -> None:
+        nonlocal participant
+        if val is None:
+            return
+        if hasattr(val, "identity") or hasattr(val, "sid"):
+            participant = val
+
+    for arg in args:
+        if isinstance(arg, dict):
+            _maybe_set_digit(arg.get("digit") or arg.get("dtmf") or arg.get("tone"))
+            _maybe_set_participant(arg.get("participant"))
+            participant_identity = (
+                participant_identity
+                or arg.get("participant_identity")
+                or arg.get("participant_id")
+                or arg.get("participant_sid")
+                or arg.get("identity")
+                or arg.get("sid")
+            )
+        else:
+            _maybe_set_digit(
+                arg if isinstance(arg, str) else (
+                    getattr(arg, "digit", None)
+                    or getattr(arg, "dtmf", None)
+                    or getattr(arg, "tone", None)
+                )
+            )
+            _maybe_set_participant(arg)
+            participant_identity = (
+                participant_identity
+                or getattr(arg, "participant_identity", None)
+                or getattr(arg, "participant_id", None)
+                or getattr(arg, "participant_sid", None)
+                or getattr(arg, "identity", None)
+                or getattr(arg, "sid", None)
+            )
+
+    _maybe_set_digit(kwargs.get("digit") or kwargs.get("dtmf") or kwargs.get("tone"))
+    _maybe_set_participant(kwargs.get("participant"))
+    participant_identity = (
+        participant_identity
+        or kwargs.get("participant_identity")
+        or kwargs.get("participant_id")
+        or kwargs.get("participant_sid")
+        or kwargs.get("identity")
+        or kwargs.get("sid")
+    )
+
+    if participant_identity is None and participant is not None:
+        participant_identity = getattr(participant, "identity", None) or getattr(participant, "sid", None)
+
+    if isinstance(participant_identity, bytes):
+        participant_identity = participant_identity.decode("utf-8", errors="ignore")
+
+    return digit, participant_identity
+
+
+async def _move_participant(lk: api.LiveKitAPI, from_room: str, identity: str, to_room: str) -> bool:
+    room_svc = getattr(lk, "room", None) or getattr(lk, "room_service", None)
+    req_cls = getattr(api, "MoveParticipantRequest", None)
+    if room_svc is None or req_cls is None:
+        log.warning("MoveParticipant not available in this LiveKit API version.")
+        return False
+
+    req = None
+    for key in ("to_room", "destination_room", "target_room", "room_to", "new_room"):
+        try:
+            req = req_cls(room=from_room, identity=identity, **{key: to_room})
+            break
+        except Exception:
+            continue
+
+    # Some SDK/proto versions only accept positional init + setattr style.
+    if req is None:
+        try:
+            req = req_cls(room=from_room, identity=identity)
+            for key in ("to_room", "destination_room", "target_room", "room_to", "new_room"):
+                try:
+                    setattr(req, key, to_room)
+                    break
+                except Exception:
+                    continue
+        except Exception:
+            req = None
+
+    if req is None:
+        log.warning("MoveParticipantRequest signature mismatch; cannot move participant.")
+        return False
+
+    for method in ("move_participant", "transfer_participant"):
+        fn = getattr(room_svc, method, None)
+        if callable(fn):
+            try:
+                await fn(req)
+                return True
+            except Exception as e:
+                log.warning("Move participant via %s failed: %r", method, e)
+                return False
+
+    log.warning("Room service does not support move/transfer participant.")
+    return False
+
+
+async def _run_sip_router(ctx: JobContext) -> None:
+    log.info("SIP router connected. Room=%s", ctx.room)
+
+    api_key = _require_env("LIVEKIT_API_KEY")
+    api_secret = _require_env("LIVEKIT_API_SECRET")
+    livekit_url = _require_env("LIVEKIT_URL")
+
+    lk = api.LiveKitAPI(livekit_url, api_key, api_secret)
+    buffers: dict[str, str] = {}
+    moved_participants: set[str] = set()
+    fallback_scheduled: set[str] = set()
+
+    def _safe_repr(val: Any, limit: int = 300) -> str:
+        try:
+            raw = repr(val)
+        except Exception:
+            raw = "<unreprable>"
+        return raw if len(raw) <= limit else raw[:limit] + "...(truncated)"
+
+    async def _route_code(code: str, participant_id: str) -> None:
+        code = code.strip()
+        if len(code) != SESSION_CODE_LEN:
+            log.info("Ignoring code with wrong length: '%s'", code)
+            return
+        dest_room = _session_codes.resolve(code)
+        if not dest_room:
+            log.info("Invalid/expired code '%s' for participant %s", code, participant_id)
+            return
+        from_room = getattr(ctx.room, "name", SIP_LOBBY_ROOM)
+        ok = await _move_participant(lk, from_room, participant_id, dest_room)
+        log.info("Move participant %s -> %s (ok=%s)", participant_id, dest_room, ok)
+        if ok:
+            moved_participants.add(str(participant_id))
+
+    async def _handle_dtmf(*args, **kwargs) -> None:
+        log.info("DTMF callback fired. args=%s kwargs=%s", _safe_repr(args), _safe_repr(kwargs))
+        digit, participant_id = _parse_dtmf_event(*args, **kwargs)
+        log.info("DTMF parsed. digit=%s participant=%s", digit, participant_id)
+        if not digit or not participant_id:
+            log.warning("DTMF parse incomplete; ignored event.")
+            return
+
+        if digit == "*":
+            buffers[participant_id] = ""
+            log.info("DTMF reset buffer for participant=%s", participant_id)
+            return
+
+        if digit == "#":
+            code = buffers.get(participant_id, "")
+            buffers[participant_id] = ""
+            log.info("DTMF submit for participant=%s code='%s'", participant_id, code)
+            await _route_code(code, participant_id)
+            return
+
+        if digit.isdigit():
+            buf = buffers.get(participant_id, "") + digit
+            log.info("DTMF digit for participant=%s buffer='%s'", participant_id, buf)
+            if len(buf) >= SESSION_CODE_LEN:
+                code = buf[:SESSION_CODE_LEN]
+                buffers[participant_id] = ""
+                log.info("DTMF auto-submit for participant=%s code='%s'", participant_id, code)
+                await _route_code(code, participant_id)
+            else:
+                buffers[participant_id] = buf
+
+    def _participant_identity(val: Any) -> Optional[str]:
+        if val is None:
+            return None
+        cand = (
+            getattr(val, "identity", None)
+            or getattr(val, "sid", None)
+            or getattr(val, "participant_identity", None)
+        )
+        if isinstance(cand, bytes):
+            cand = cand.decode("utf-8", errors="ignore")
+        if cand is None:
+            return None
+        return str(cand)
+
+    async def _fallback_move_participant(participant_id: str) -> None:
+        if participant_id in moved_participants:
+            return
+        # Give DTMF a short chance first; fallback only if no code was entered.
+        await asyncio.sleep(6)
+        if participant_id in moved_participants:
+            return
+        latest_room = _session_codes.latest_room()
+        if not latest_room:
+            log.warning("No active case room found for SIP fallback move.")
+            return
+        from_room = getattr(ctx.room, "name", SIP_LOBBY_ROOM)
+        ok = await _move_participant(lk, from_room, participant_id, latest_room)
+        log.info("Fallback move participant %s -> %s (ok=%s)", participant_id, latest_room, ok)
+        if ok:
+            moved_participants.add(str(participant_id))
+
+    def _schedule_fallback(participant_id: Optional[str]) -> None:
+        if not participant_id:
+            return
+        pid = str(participant_id)
+        if pid in fallback_scheduled or pid in moved_participants:
+            return
+        fallback_scheduled.add(pid)
+        asyncio.create_task(_fallback_move_participant(pid))
+
+    async def _handle_participant_connected(*args, **kwargs) -> None:
+        participant = None
+        if args:
+            participant = args[0]
+        participant = kwargs.get("participant", participant)
+        pid = _participant_identity(participant)
+        if not pid:
+            pid = (
+                kwargs.get("participant_identity")
+                or kwargs.get("participant_id")
+                or kwargs.get("participant_sid")
+            )
+            if pid is not None:
+                pid = str(pid)
+        log.info("Participant-connected callback in lobby. participant=%s", pid)
+        _schedule_fallback(pid)
+
+    def _attach_listener(event_name: str) -> None:
+        if hasattr(ctx.room, "on"):
+            try:
+                ctx.room.on(event_name, lambda *a, **k: asyncio.create_task(_handle_dtmf(*a, **k)))
+                log.info("✅ DTMF listener attached via room.on('%s')", event_name)
+                return
+            except Exception as e:
+                log.warning("room.on('%s') failed: %r", event_name, e)
+
+        if hasattr(ctx.room, "add_listener"):
+            try:
+                ctx.room.add_listener(
+                    event_name,
+                    lambda *a, **k: asyncio.create_task(_handle_dtmf(*a, **k)),
+                )
+                log.info("✅ DTMF listener attached via room.add_listener('%s')", event_name)
+            except Exception as e:
+                log.warning("room.add_listener('%s') failed: %r", event_name, e)
+
+    _attach_listener("sip_dtmf_received")
+    _attach_listener("dtmf_received")
+
+    def _attach_participant_listener(event_name: str) -> None:
+        if hasattr(ctx.room, "on"):
+            try:
+                ctx.room.on(event_name, lambda *a, **k: asyncio.create_task(_handle_participant_connected(*a, **k)))
+                log.info("✅ Participant listener attached via room.on('%s')", event_name)
+                return
+            except Exception as e:
+                log.warning("room.on('%s') failed: %r", event_name, e)
+        if hasattr(ctx.room, "add_listener"):
+            try:
+                ctx.room.add_listener(
+                    event_name,
+                    lambda *a, **k: asyncio.create_task(_handle_participant_connected(*a, **k)),
+                )
+                log.info("✅ Participant listener attached via room.add_listener('%s')", event_name)
+            except Exception as e:
+                log.warning("room.add_listener('%s') failed: %r", event_name, e)
+
+    _attach_participant_listener("participant_connected")
+    _attach_participant_listener("participant_joined")
+
+    async def _poll_existing_participants() -> None:
+        # Some SDK builds don't emit participant join events reliably for SIP.
+        for _ in range(30):  # ~30 seconds
+            try:
+                remote = getattr(ctx.room, "remote_participants", None)
+                if isinstance(remote, dict):
+                    for p in remote.values():
+                        _schedule_fallback(_participant_identity(p))
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+
+    asyncio.create_task(_poll_existing_participants())
+
+    stop_event = asyncio.Event()
+
+    def request_stop(*_):
+        if not stop_event.is_set():
+            stop_event.set()
+
+    try:
+        ctx.room.on("room_disconnected", lambda *_: request_stop())
+    except Exception:
+        pass
+
+    try:
+        await stop_event.wait()
+    finally:
+        await _safe_ctx_shutdown(ctx, reason="SIP router ended")
+
+
+async def _run_conversation(ctx: JobContext) -> None:
     log.info("Connected. Room=%s", ctx.room)
 
     # Ensure user transcript tap + typed chat listener are installed ASAP
@@ -754,6 +1215,39 @@ async def entrypoint(ctx: JobContext):
         log.warning("Noise cancellation unavailable, proceeding without it: %r", e)
         room_input_opts = RoomInputOptions()
 
+    # SIP participants can present audio tracks as SOURCE_UNKNOWN on some SDK versions.
+    # If we only accept SOURCE_MICROPHONE, the agent may ignore bank-side speech.
+    try:
+        track_source = getattr(rtc, "TrackSource", None)
+        accepted_sources = []
+        if track_source is not None:
+            for src_name in ("SOURCE_MICROPHONE", "SOURCE_UNKNOWN"):
+                src_val = getattr(track_source, src_name, None)
+                if src_val is not None:
+                    accepted_sources.append(src_val)
+
+        if accepted_sources:
+            applied = False
+            for attr_name in ("accepted_sources", "accepted_audio_sources", "audio_sources"):
+                if hasattr(room_input_opts, attr_name):
+                    setattr(room_input_opts, attr_name, accepted_sources)
+                    applied = True
+                    log.info("Room input accepted sources configured via '%s': %s", attr_name, accepted_sources)
+                    break
+
+            if not applied:
+                # Fallback for versions that only accept constructor kwargs.
+                try:
+                    room_input_opts = RoomInputOptions(
+                        noise_cancellation=getattr(room_input_opts, "noise_cancellation", None),
+                        accepted_sources=accepted_sources,
+                    )
+                    log.info("Room input accepted sources configured via constructor: %s", accepted_sources)
+                except Exception as e:
+                    log.warning("Could not set accepted sources for room input options: %r", e)
+    except Exception as e:
+        log.warning("Failed to configure SIP-compatible accepted sources: %r", e)
+
     # Agent persona
     agent = CustomerLLMAgent()
     setattr(ctx.room, "_agent_instance", agent)
@@ -763,7 +1257,7 @@ async def entrypoint(ctx: JobContext):
 
     # ✅ Filter tool calls from session.say() before TTS
     _install_session_say_hook(session, ctx.room)
-    
+
     # ✅ main guarantee: agent speech -> iOS chat
     _install_tts_to_chat_hook(session, ctx.room)
 
@@ -802,7 +1296,25 @@ async def entrypoint(ctx: JobContext):
     finally:
         with contextlib.suppress(Exception):
             await session.aclose()
-        await ctx.shutdown(reason="Session ended")
+        await _safe_ctx_shutdown(ctx, reason="Session ended")
+
+
+async def entrypoint(ctx: JobContext):
+    await ctx.connect()
+    room_name = _get_room_name(ctx)
+    if not room_name:
+        room_name = getattr(getattr(ctx, "room", None), "name", "") or ""
+
+    if room_name == SIP_LOBBY_ROOM:
+        await _run_sip_router(ctx)
+        return
+
+    if room_name.startswith(ROOM_PREFIX):
+        await _run_conversation(ctx)
+        return
+
+    log.info("Room '%s' not handled by this agent. Shutting down.", room_name)
+    await _safe_ctx_shutdown(ctx, reason="Room not handled")
 
 
 # ---------------------------------------------------------------------
@@ -941,7 +1453,40 @@ def create_token(req: TokenRequest):
         )
         .to_jwt()
     )
-    return {"token": token}
+    return {"token": token, "url": os.getenv("LIVEKIT_URL")}
+
+
+@app.post("/livekit/session")
+def create_session(req: SessionRequest):
+    livekit_url = _require_env("LIVEKIT_URL")
+    api_key = _require_env("LIVEKIT_API_KEY")
+    api_secret = _require_env("LIVEKIT_API_SECRET")
+
+    room = f"{ROOM_PREFIX}{uuid.uuid4().hex[:10]}"
+    code = _session_codes.create(room)
+
+    token = (
+        api.AccessToken(api_key, api_secret)
+        .with_identity(req.identity)
+        .with_name(req.name or req.identity)
+        .with_grants(
+            api.VideoGrants(
+                room_join=True,
+                room=room,
+                can_publish=True,
+                can_subscribe=True,
+                can_publish_data=True,
+            )
+        )
+        .to_jwt()
+    )
+    return {
+        "room": room,
+        "code": code,
+        "token": token,
+        "url": livekit_url,
+        "expires_in": SESSION_CODE_TTL_SEC,
+    }
 
 
 # ---------------------------------------------------------------------

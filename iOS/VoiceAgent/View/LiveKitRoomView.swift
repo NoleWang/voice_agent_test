@@ -15,6 +15,7 @@ struct LiveKitRoomView: View {
 
     let roomUrl: String
     let token: String
+    let shortCode: String?
     let bankPhoneNumber: String?
     let bootstrapPayload: LiveKitBootstrapPayload?
 
@@ -34,12 +35,14 @@ struct LiveKitRoomView: View {
         manager: LiveKitManager,
         roomUrl: String,
         token: String,
+        shortCode: String? = nil,
         bankPhoneNumber: String? = nil,
         bootstrapPayload: LiveKitBootstrapPayload? = nil
     ) {
         self.manager = manager
         self.roomUrl = roomUrl
         self.token = token
+        self.shortCode = shortCode
         self.bankPhoneNumber = bankPhoneNumber
         self.bootstrapPayload = bootstrapPayload
         self.manager.pendingBootstrapPayload = bootstrapPayload
@@ -161,16 +164,18 @@ struct LiveKitRoomView: View {
                 .font(.headline)
                 .padding(.horizontal)
 
-//            VStack(alignment: .leading, spacing: 10) {
-//                Text("1. Call your bank from the Phone app (or tap below).")
-//                Text("   (The bank will see your personal phone number.)")
-//                Text("2. After the bank answers, tap “Add Call”.")
-//                Text("3. Dial the LiveKit number and wait for it to answer.")
-//                Text("4. Merge the calls so the agent hears both sides.")
-//            }
-//            .font(.subheadline)
-//            .foregroundStyle(.secondary)
-//            .padding(.horizontal)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("1. Call your bank from the Phone app (or tap below).")
+                Text("2. After the bank answers, tap “Add Call”.")
+                Text("3. Dial the LiveKit number and wait for it to answer.")
+                if let code = shortCode, !code.isEmpty {
+                    Text("4. Enter code \(code), then press #.")
+                }
+                Text("5. Merge the calls so the agent hears both sides.")
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal)
 
             VStack(spacing: 10) {
                 callButton(title: "Call Bank", number: bankPhone, color: .blue)

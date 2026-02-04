@@ -39,6 +39,7 @@ struct DisputeTransactionFormView: View {
         let id = UUID()
         let url: String
         let token: String
+        let code: String
         let bankPhoneNumber: String?  // Bank phone number for user-initiated call
         let bootstrapPayload: LiveKitBootstrapPayload?
     }
@@ -86,6 +87,7 @@ struct DisputeTransactionFormView: View {
                     manager: liveKitManager,
                     roomUrl: info.url,
                     token: info.token,
+                    shortCode: info.code,
                     bankPhoneNumber: info.bankPhoneNumber,
                     bootstrapPayload: info.bootstrapPayload
                 )
@@ -620,17 +622,15 @@ struct DisputeTransactionFormView: View {
             defer { Task { @MainActor in isStartingRoom = false } }
 
             do {
-                let roomName = AppConfig.liveKitRoom
                 let identity = "customer_\(profile.firstName.lowercased())_\(profile.lastName.lowercased())"
                 let name = "\(profile.firstName) \(profile.lastName)"
 
-                let resp = try await LiveKitTokenAPI.fetchToken(
-                    room: roomName,
+                let resp = try await LiveKitTokenAPI.fetchSession(
                     identity: identity,
                     name: name
                 )
 
-                let candidate = (resp.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let candidate = resp.url.trimmingCharacters(in: .whitespacesAndNewlines)
                 let rawUrl: String = {
                     if candidate.isEmpty || candidate == "wss://" || candidate == "ws://" {
                         return AppConfig.liveKitURL
@@ -657,6 +657,7 @@ struct DisputeTransactionFormView: View {
                     self.joinInfo = LiveKitJoinInfo(
                         url: cleaned,
                         token: resp.token,
+                        code: resp.code,
                         bankPhoneNumber: bankPhoneNumber,
                         bootstrapPayload: bootstrapPayload
                     )
